@@ -56,7 +56,14 @@ The [SQLite Zipfile Module](https://sqlite.org/zipfile.html) is used to read and
 Parsing XML is complicated so I decided best relying on a reputable library: xlsximport depends on [Expat](http://expat.sourceforge.net/).
 Writing XML is easier so the xlsxexport extension in the copilot, gemini, opus folders do not use external libraries. Do not worry about reputability because the xlsxexport extension in folders copilot_libxlsxwriter and opus_libxlsxwriter depends on [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter).
 
-### LICENSE:
+Compilation depends on SQLite includes. One way to get them is
+```
+curl -C - --remote-name  https://sqlite.org/2025/sqlite-amalgamation-3510100.zip
+unzip sqlite-amalgamation-3510100.zip
+```
+
+## LICENSE:
 My xlsximport and xlsxexport code is Public Domain. Same as [SQLite](https://www.sqlite.org/). Notice though that [Expat](http://expat.sourceforge.net/) license is MIT, and [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter) license is FreeBSD.
+
 
 
