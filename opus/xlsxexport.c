@@ -601,7 +601,7 @@ static void xlsx_export_func(
 
         strbuf_append(&insert_sql, "SELECT writefile(?, (SELECT zipfile(name, data) FROM contents))");
 
-        fprintf(stderr, "zipfile_insert_via_vtab() %s\n", insert_sql.str);
+        //fprintf(stderr, "zipfile_insert_via_vtab() %s\n", insert_sql.str);
         rc = sqlite3_prepare_v2(db, insert_sql.str, -1, &stmt, NULL);
         strbuf_free(&insert_sql);
         
