@@ -2,7 +2,7 @@
 
 # Compiler settings
 CC ?= gcc
-CFLAGS ?= -O2 -fPIC -Wall -Wextra
+CFLAGS ?= -O2 -fPIC -Wall -Wextra -I../../sqlite-amalgamation-3510100
 # Assuming libxlsxwriter headers are in system path or standard include path.
 # If not, add -I/path/to/libxlsxwriter/include
 
@@ -14,7 +14,6 @@ CFLAGS_WIN64 ?= -O2 -Wall -Wextra -I../../sqlite-amalgamation-3510100
 ifeq ($(OS),Windows_NT)
     SHARED_EXT = .dll
     LDFLAGS = -shared
-    LIBS = -lxlsxwriter
 else
     UNAME := $(shell uname)
     ifeq ($(UNAME),Darwin)
@@ -24,7 +23,6 @@ else
         SHARED_EXT = .so
         LDFLAGS = -shared
     endif
-    LIBS = -lxlsxwriter
 endif
 
 # Targets
@@ -35,7 +33,7 @@ all: $(TARGET_EXPORT)
 
 # Export (requires libxlsxwriter)
 $(TARGET_EXPORT): xlsxexport.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< -lxlsxwriter
 	strip $@
 
 # Cross-compile target for Windows
