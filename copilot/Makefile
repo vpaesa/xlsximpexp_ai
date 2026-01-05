@@ -2,7 +2,7 @@
 
 # Compiler settings
 CC ?= gcc
-CFLAGS ?= -O2 -fPIC -Wall -Wextra
+CFLAGS ?= -O2 -fPIC -Wall -Wextra -I../../sqlite-amalgamation-3510100
 
 # Cross-compiler for Windows 64-bit (MinGW-w64)
 CC_WIN64 ?= x86_64-w64-mingw32-gcc
@@ -11,7 +11,6 @@ CFLAGS_WIN64 ?= -O2 -Wall -Wextra -I../../sqlite-amalgamation-3510100
 ifeq ($(OS),Windows_NT)
     SHARED_EXT = .dll
     LDFLAGS = -shared
-    LIBS = -lexpat
 else
     UNAME := $(shell uname)
     ifeq ($(UNAME),Darwin)
@@ -21,7 +20,6 @@ else
         SHARED_EXT = .so
         LDFLAGS = -shared
     endif
-    LIBS = -lexpat
 endif
 
 # Targets
@@ -34,13 +32,13 @@ all: $(TARGET_IMPORT) $(TARGET_EXPORT)
 
 # Import
 $(TARGET_IMPORT): xlsximport.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< -lexpat
 	strip $@
 
 # Export 
 # Note: For Windows, -lz -lmsvcrt
 $(TARGET_EXPORT): xlsxexport.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBS) -lz -lmsvcrt
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBS) -lz
 	strip $@
 
 # Cross-compile
