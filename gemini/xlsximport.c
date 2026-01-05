@@ -369,7 +369,7 @@ static int get_zip_content(sqlite3 *db, const char *zipname, const char *filenam
     } else {
         rc = SQLITE_ERROR;
     }
-    fprintf(stderr, "get_zip_content(%d)\n", *len);
+    //fprintf(stderr, "get_zip_content(%d)\n", *len);
     sqlite3_finalize(stmt);
     return rc;
 }
