@@ -1,31 +1,32 @@
 /*
-** PROMPTS USED:
-**
-** "create the C code for a SQLite extension named xlsxexport that 
-** contains a SQL function named xlsx_export that saves multiple tables 
-** as a single XLSX spreadsheet, with the sheet names equal to the table 
-** names, and the sheet headers in bold and with autofilter. The XLSX file 
-** is a ZIP archive with XML files inside. Use the zipfile extension to 
-** create this ZIP archive. Do not use any external library to write XML 
-** files. Include as comments the prompts used."
-**
-** "warn if the Excel maximum cell size is exceeded"
-**
-** "sanitize the sheet names to conform to Excel restrictions"
-**
-** USAGE IN SQLITE:
-**    .load zipfile
-**    .load xlsxexport
-**    SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
-**    -- or with a single table:
-**    SELECT xlsx_export('output.xlsx', 'mytable');
-**
-** NOTES:
-**    - Requires the zipfile extension to be loaded first
-**    - Generates XLSX-compliant XML files manually
-**    - Headers are bold (using styles.xml) with autofilter enabled
-**    - Warns if cell content exceeds Excel's 32,767 character limit
-**    - Sheet names are sanitized (max 31 chars, no \ / ? * [ ] :, no "History")
+PROMPTS USED:
+
+Create the C code for a SQLite extension named xlsxexport that 
+contains a SQL function named xlsx_export that saves multiple tables 
+as a single XLSX spreadsheet, with the sheet names equal to the table 
+names, and the sheet headers in bold and with autofilter. 
+If only one parameter then exports all the tables in the schema. 
+The XLSX file is a ZIP archive with XML files inside.  
+Use the zipfile extension to create this ZIP archive. 
+Do not use any external library to write XML files.
+Warn if the Excel maximum cell size is exceeded.
+Sanitize the sheet names to conform to Excel restrictions.
+Include as comments the prompts used.
+
+USAGE IN SQLITE:
+    .load zipfile
+    .load xlsxexport
+    SELECT xlsx_export('output.xlsx');  -- Export all tables in the schema
+    SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
+    -- or with a single table:
+    SELECT xlsx_export('output.xlsx', 'mytable');
+
+NOTES:
+    - Requires the zipfile extension to be loaded first
+    - Generates XLSX-compliant XML files manually
+    - Headers are bold (using styles.xml) with autofilter enabled
+    - Warns if cell content exceeds Excel's 32,767 character limit
+    - Sheet names are sanitized (max 31 chars, no \ / ? * [ ] :, no "History")
 */
 
 #include <stdio.h>
@@ -479,9 +480,12 @@ static char *gen_worksheet(sqlite3 *db, const char *table_name, char **err_msg,
 }
 
 /*
-** SQL function: xlsx_export(filename, table1, table2, ...)
+** SQL function: xlsx_export(filename [, table1, table2, ...])
 **
-** Exports one or more tables to an XLSX file using the zipfile extension.
+** Exports tables to an XLSX file using the zipfile extension.
+** The first argument is the output filename.
+** If no table names are provided, all tables in the schema are exported.
+** If table names are provided, only those tables are exported.
 ** Returns the filename on success.
 */
 static void xlsx_export_func(
@@ -495,6 +499,7 @@ static void xlsx_export_func(
     int i;
     int sheet_count;
     const char **sheet_names = NULL;
+    char **sheet_names_allocated = NULL;  /* For freeing dynamically allocated names */
     char **sheet_contents = NULL;
     char *content_types = NULL;
     char *rels = NULL;
@@ -505,11 +510,12 @@ static void xlsx_export_func(
     char *sql = NULL;
     int rc;
     ExportWarnings warnings = {0, 0, 0, NULL};
+    int names_need_free = 0;  /* Flag to indicate if we need to free sheet_names_allocated */
     
-    /* Need at least filename and one table name */
-    if (argc < 2) {
+    /* Need at least the filename */
+    if (argc < 1) {
         sqlite3_result_error(context, 
-            "xlsx_export requires at least 2 arguments: filename and table name(s)", -1);
+            "xlsx_export requires at least 1 argument: filename", -1);
         return;
     }
     
@@ -521,24 +527,96 @@ static void xlsx_export_func(
     filename = (const char *)sqlite3_value_text(argv[0]);
     
     db = sqlite3_context_db_handle(context);
-    sheet_count = argc - 1;
     
-    /* Collect sheet names */
-    sheet_names = sqlite3_malloc(sizeof(char *) * sheet_count);
+    if (argc == 1) {
+        /* No table names provided - export all tables from schema */
+        sqlite3_stmt *table_stmt = NULL;
+        int table_capacity = 16;
+        
+        /* Query sqlite_master for all user tables (exclude sqlite_ internal tables) */
+        rc = sqlite3_prepare_v2(db, 
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY rowid", 
+            -1, &table_stmt, NULL);
+        
+        if (rc != SQLITE_OK) {
+            sqlite3_result_error(context, "Failed to query schema for table names", -1);
+            return;
+        }
+        
+        sheet_names_allocated = sqlite3_malloc(sizeof(char *) * table_capacity);
+        if (!sheet_names_allocated) {
+            sqlite3_finalize(table_stmt);
+            sqlite3_result_error(context, "Out of memory", -1);
+            return;
+        }
+        
+        sheet_count = 0;
+        while ((rc = sqlite3_step(table_stmt)) == SQLITE_ROW) {
+            if (sheet_count >= table_capacity) {
+                table_capacity *= 2;
+                char **new_names = sqlite3_realloc(sheet_names_allocated, sizeof(char *) * table_capacity);
+                if (!new_names) {
+                    for (i = 0; i < sheet_count; i++) {
+                        sqlite3_free(sheet_names_allocated[i]);
+                    }
+                    sqlite3_free(sheet_names_allocated);
+                    sqlite3_finalize(table_stmt);
+                    sqlite3_result_error(context, "Out of memory", -1);
+                    return;
+                }
+                sheet_names_allocated = new_names;
+            }
+            const char *tbl_name = (const char *)sqlite3_column_text(table_stmt, 0);
+            sheet_names_allocated[sheet_count] = sqlite3_mprintf("%s", tbl_name);
+            if (!sheet_names_allocated[sheet_count]) {
+                for (i = 0; i < sheet_count; i++) {
+                    sqlite3_free(sheet_names_allocated[i]);
+                }
+                sqlite3_free(sheet_names_allocated);
+                sqlite3_finalize(table_stmt);
+                sqlite3_result_error(context, "Out of memory", -1);
+                return;
+            }
+            sheet_count++;
+        }
+        sqlite3_finalize(table_stmt);
+        
+        if (sheet_count == 0) {
+            sqlite3_free(sheet_names_allocated);
+            sqlite3_result_error(context, "No tables found in database", -1);
+            return;
+        }
+        
+        sheet_names = (const char **)sheet_names_allocated;
+        names_need_free = 1;
+    } else {
+        /* Use provided table names */
+        sheet_count = argc - 1;
+        
+        sheet_names = sqlite3_malloc(sizeof(char *) * sheet_count);
+        if (!sheet_names) {
+            sqlite3_result_error(context, "Out of memory", -1);
+            return;
+        }
+        
+        for (i = 0; i < sheet_count; i++) {
+            if (sqlite3_value_type(argv[i + 1]) != SQLITE_TEXT) {
+                sqlite3_free((void *)sheet_names);
+                sqlite3_result_error(context, "Table names must be strings", -1);
+                return;
+            }
+            sheet_names[i] = (const char *)sqlite3_value_text(argv[i + 1]);
+        }
+    }
+    
+    /* Allocate sheet_contents array */
     sheet_contents = sqlite3_malloc(sizeof(char *) * sheet_count);
-    if (!sheet_names || !sheet_contents) {
+    if (!sheet_contents) {
         sqlite3_result_error(context, "Out of memory", -1);
         goto cleanup;
     }
     memset(sheet_contents, 0, sizeof(char *) * sheet_count);
-    
-    for (i = 0; i < sheet_count; i++) {
-        if (sqlite3_value_type(argv[i + 1]) != SQLITE_TEXT) {
-            sqlite3_result_error(context, "Table names must be strings", -1);
-            goto cleanup;
-        }
-        sheet_names[i] = (const char *)sqlite3_value_text(argv[i + 1]);
-    }
     
     /* Generate all worksheet contents */
     for (i = 0; i < sheet_count; i++) {
@@ -650,7 +728,12 @@ static void xlsx_export_func(
     
 cleanup:
     if (stmt) sqlite3_finalize(stmt);
-    if (sheet_names) sqlite3_free(sheet_names);
+    if (names_need_free && sheet_names) {
+        for (i = 0; i < sheet_count; i++) {
+            sqlite3_free((char *)sheet_names[i]);
+        }
+    }
+    if (sheet_names) sqlite3_free((void *)sheet_names);
     if (sheet_contents) {
         for (i = 0; i < sheet_count; i++) {
             sqlite3_free(sheet_contents[i]);
