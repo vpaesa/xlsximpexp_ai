@@ -6,10 +6,16 @@ parsing.
 Two SQL functions defined
 xlsx_import() creates one table for each sheet in the XLSX file, with table name
 equal to sheet name, and column names equal to the values in the first row of
-the sheet. xlsx_import_version() returns the version string.
+the sheet. The first parameter is the XLSX filename. Subsequent optional parameters
+are sheet names or sheet numbers (1-based) to import.
+xlsx_import_version() returns the version string.
 
 Usage:
-SELECT xlsx_import('filename.xlsx');
+.load xlsximport.so
+SELECT xlsx_import('filename.xlsx');  -- Import all sheets
+SELECT xlsx_import('filename.xlsx', 'Sheet1', 'Sheet2');  -- Import specific sheets by name
+SELECT xlsx_import('filename.xlsx', 1, 3);  -- Import sheets by number (1-based)
+SELECT xlsx_import('filename.xlsx', 'Sheet1', 2);  -- Mix of names and numbers
 SELECT xlsx_import_version();
 **
 ** ============================================================================
@@ -65,19 +71,6 @@ SQLITE_EXTENSION_INIT1
 ** Utility Functions
 ** ============================================================================
 */
-
-/*
-** Convert a column name (A, B, ..., Z, AA, AB, ...) to a 1-based column number.
-** A=1, B=2, ..., Z=26, AA=27, AB=28, ...
-*/
-static int col_to_num(const char *col) {
-  int num = 0;
-  while (*col && isalpha((unsigned char)*col)) {
-    num = num * 26 + (toupper((unsigned char)*col) - 'A' + 1);
-    col++;
-  }
-  return num;
-}
 
 /*
 ** Parse a cell reference like "AB67" into column number and row number.
@@ -752,7 +745,54 @@ static int create_table_from_worksheet(sqlite3 *db, const char *table_name,
 }
 
 /*
-** xlsx_import(filename) - Import all sheets from an XLSX file as tables.
+** Helper function to check if a sheet should be imported based on the
+** optional sheetname1..sheetnameN parameters.
+** If no sheet parameters are provided (argc == 1), all sheets are imported.
+** If sheet parameters are provided:
+**   - Integer parameter: import sheet with that 1-based index
+**   - String parameter: import sheet with that name
+** Returns 1 if the sheet should be imported, 0 otherwise.
+*/
+static int should_import_sheet(int argc, sqlite3_value **argv,
+                               int sheet_index,   /* 0-based index */
+                               const char *sheet_name) {
+  /* If no sheet parameters provided, import all sheets */
+  if (argc <= 1) {
+    return 1;
+  }
+
+  /* Check each sheet parameter (argv[1] through argv[argc-1]) */
+  for (int i = 1; i < argc; i++) {
+    int value_type = sqlite3_value_type(argv[i]);
+
+    if (value_type == SQLITE_INTEGER) {
+      /* Integer parameter: compare with 1-based sheet number */
+      int sheet_num = sqlite3_value_int(argv[i]);
+      if (sheet_num == sheet_index + 1) {
+        return 1;
+      }
+    } else if (value_type == SQLITE_TEXT) {
+      /* String parameter: compare with sheet name */
+      const char *param_name = (const char *)sqlite3_value_text(argv[i]);
+      if (param_name && sheet_name && strcmp(param_name, sheet_name) == 0) {
+        return 1;
+      }
+    }
+  }
+
+  return 0;
+}
+
+/*
+** xlsx_import(filename, [sheetname1, sheetname2, ...]) - Import sheets from
+** an XLSX file as tables.
+**
+** Parameters:
+**   filename    - Path to the XLSX file to import
+**   sheetname1..sheetnameN - Optional sheet selectors (string name or integer
+**                            number). If none provided, all sheets are
+**                            imported. Integer parameters specify 1-based
+**                            sheet numbers.
 */
 static void xlsx_import_func(sqlite3_context *ctx, int argc,
                              sqlite3_value **argv) {
@@ -817,6 +857,11 @@ static void xlsx_import_func(sqlite3_context *ctx, int argc,
   /* Process each sheet */
   int tables_created = 0;
   for (int i = 0; i < wb.count; i++) {
+    /* Check if this sheet should be imported based on optional parameters */
+    if (!should_import_sheet(argc, argv, i, wb.sheets[i].name)) {
+      continue;
+    }
+
     char sheet_path[64];
     snprintf(sheet_path, sizeof(sheet_path), "xl/worksheets/sheet%d.xml",
              i + 1);
@@ -886,7 +931,9 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg,
   SQLITE_EXTENSION_INIT2(pApi);
   (void)pzErrMsg;
 
-  int rc = sqlite3_create_function(db, "xlsx_import", 1,
+  /* Register xlsx_import with -1 for nArg to accept variable number of
+   * arguments (filename plus optional sheet selectors) */
+  int rc = sqlite3_create_function(db, "xlsx_import", -1,
                                    SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL,
                                    xlsx_import_func, NULL, NULL);
   if (rc != SQLITE_OK)
