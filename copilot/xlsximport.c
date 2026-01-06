@@ -11,18 +11,22 @@ To save on space, Microsoft stores all the character literal values in one commo
 Microsoft does not store empty cells or rows in xl/worksheets/sheet1.xml, so any gaps between values have to be taken care by the code.
 Excel cell content length limit is 32767 characters.
 Create a SQL function named xlsx_import that creates one table for each of the sheets in the XLSX files, table name equal to sheet name, and column names equal to the values in first row of the sheet.
-Use expat for XML parsing. Add support for both shared and inline strings.  Perform table name and column sanititazion. Add SQL function xlsx_import_version returning "2025-12-30 Copilot Think Deeper (GPT 5.1?)". Add all user prompts as comments.
+The first parameter is the XLSX filename. Subsequent optional parameters are sheet names or sheet numbers (1-based) to import.
+Use expat for XML parsing. Add support for both shared and inline strings.  
+Do not perform table name and column sanititazion. Use proper quoting instead. 
+Add SQL function xlsx_import_version returning "2025-12-30 Copilot Think Deeper (GPT 5.1?)". 
+Add all user prompts as comments.
+
+Usage:
+.load xlsximport.so
+SELECT xlsx_import('filename.xlsx');  -- Import all sheets
+SELECT xlsx_import('filename.xlsx', 'Sheet1', 'Sheet2');  -- Import specific sheets by name
+SELECT xlsx_import('filename.xlsx', 1, 3);  -- Import sheets by number (1-based)
+SELECT xlsx_import('filename.xlsx', 'Sheet1', 2);  -- Mix of names and numbers
+SELECT xlsx_import_version();
 */
 
 /*
-Build:
-  gcc -fPIC -shared -o xlsximport.so xlsximport.c -lexpat -lsqlite3
-Load into SQLite:
-  .load ./xlsximport
-Note: The zipfile extension must be loaded/available in the same SQLite connection
-(e.g., .load ./zipfile) before calling xlsx_import so that the virtual table or functions
-are present and accessible.
-
 Limitations and notes:
 - This code uses the zipfile virtual table via SQL queries to fetch file contents.
 - The code is best-effort and does not implement every XLSX edge case (shared styles,
@@ -44,31 +48,29 @@ static void xlsx_import_version(sqlite3_context *context, int argc, sqlite3_valu
     sqlite3_result_text(context, "2025-12-30 Copilot Think Deeper (GPT 5.1?)", -1, SQLITE_STATIC);
 }
 
-/* Utility: sanitize identifier for SQLite (table/column names)
-   Keep letters, digits, underscore. If first char is digit, prefix with "c_".
-   Collapse runs of invalid chars to underscore. Ensure non-empty.
+/* Quote an identifier for use as a SQLite identifier.
+   Example:  Sheet "A"  ->  "Sheet ""A"""
+   Returns malloc'd string, caller must free.
 */
-static char *sanitize_identifier(const char *s){
-    if(!s) return strdup("col");
-    size_t n = strlen(s);
-    char *out = (char*)malloc(n*2 + 16);
+static char *quote_identifier(const char *s){
+    if(!s) s = "";
+    size_t len = strlen(s);
+    /* worst-case every char is a quote -> need 2*len + 2 for surrounding quotes + 1 for NUL */
+    size_t cap = len * 2 + 3;
+    char *out = (char*)malloc(cap);
+    if(!out) return NULL;
     char *p = out;
-    for(size_t i=0;i<n;i++){
-        unsigned char c = (unsigned char)s[i];
-        if((c>='A' && c<='Z') || (c>='a' && c<='z') || (c>='0' && c<='9') || c=='_'){
-            *p++ = c;
+    *p++ = '"';
+    for(const char *q = s; *q; ++q){
+        if(*q == '"'){
+            *p++ = '"'; /* double the quote */
+            *p++ = '"';
         } else {
-            if(p==out || *(p-1) != '_') *p++ = '_';
+            *p++ = *q;
         }
     }
-    if(p==out) *p++ = '_';
+    *p++ = '"';
     *p = '\0';
-    if(isdigit((unsigned char)out[0])){
-        char *tmp = (char*)malloc(strlen(out)+4);
-        sprintf(tmp, "c_%s", out);
-        free(out);
-        out = tmp;
-    }
     return out;
 }
 
@@ -83,9 +85,10 @@ static void sb_init(strbuf *s){
     s->cap = 1024;
     s->len = 0;
     s->buf = (char*)malloc(s->cap);
-    s->buf[0] = '\0';
+    if(s->buf) s->buf[0] = '\0';
 }
 static void sb_append(strbuf *s, const char *t){
+    if(!s || !s->buf) return;
     size_t tl = strlen(t);
     if(s->len + tl + 1 > s->cap){
         while(s->len + tl + 1 > s->cap) s->cap *= 2;
@@ -95,6 +98,7 @@ static void sb_append(strbuf *s, const char *t){
     s->len += tl;
 }
 static void sb_append_buf(strbuf *s, const char *t, size_t len){
+    if(!s || !s->buf) return;
     if(s->len + len + 1 > s->cap){
         while(s->len + len + 1 > s->cap) s->cap *= 2;
         s->buf = (char*)realloc(s->buf, s->cap);
@@ -104,6 +108,7 @@ static void sb_append_buf(strbuf *s, const char *t, size_t len){
     s->buf[s->len] = '\0';
 }
 static void sb_free(strbuf *s){
+    if(!s) return;
     free(s->buf);
     s->buf = NULL;
     s->len = s->cap = 0;
@@ -156,6 +161,7 @@ typedef struct {
 } ss_parser_ctx;
 
 static void ss_start(void *userData, const XML_Char *name, const XML_Char **atts){
+    (void)atts;
     ss_parser_ctx *ctx = (ss_parser_ctx*)userData;
     if(strcmp(name, "si")==0){
         ctx->in_si = 1;
@@ -347,7 +353,6 @@ static void sheet_char(void *userData, const XML_Char *s, int len){
    If the file is not found, returns NULL.
 */
 static char *read_zip_file_sqlite(sqlite3 *db, const char *archive, const char *internal_name, size_t *out_len){
-    //fprintf(stderr, "read_zip_file_sqlite(%s, %s)\n", archive, internal_name);
     if(!db || !archive || !internal_name) return NULL;
     const char *sql =
         "SELECT data FROM zipfile(?) WHERE name = ? LIMIT 1;";
@@ -368,12 +373,11 @@ static char *read_zip_file_sqlite(sqlite3 *db, const char *archive, const char *
             result[bytes] = '\0';
             if(out_len) *out_len = (size_t)bytes;
         } else {
-            // empty file -> return empty string
+            /* empty file -> return empty string */
             result = strdup("");
             if(out_len) *out_len = 0;
         }
     }
-    //fprintf(stderr, "read_zip_file_sqlite(%lln)\n", out_len);
     sqlite3_finalize(stmt);
     return result;
 }
@@ -419,10 +423,46 @@ static void sheet_rows_emit(int rownum, char **cols, size_t ncols, void *udata){
     sr->n++;
 }
 
+/* Helper: check if a string is an integer (consists of digits only) */
+static int is_integer_string(const char *s){
+    if(!s || *s == '\0') return 0;
+    const char *p = s;
+    if(*p == '+' || *p == '-') p++;
+    if(!*p) return 0;
+    while(*p){
+        if(!isdigit((unsigned char)*p)) return 0;
+        p++;
+    }
+    return 1;
+}
+
+/* Helper: decide whether to import a sheet based on provided selectors.
+   selectors: array of strings (names or integers). selector_count may be 0 -> import all.
+   For integer selectors, match if selector == sheetId OR selector == (si+1) (1-based index).
+   For name selectors, case-sensitive exact match against workbook name.
+*/
+static int should_import_sheet(const wb_parser_ctx *wb, size_t si, int sheetId, const char **selectors, int selector_count){
+    if(selector_count <= 0) return 1; /* import all */
+    for(int i=0;i<selector_count;i++){
+        const char *sel = selectors[i];
+        if(!sel) continue;
+        if(is_integer_string(sel)){
+            int val = atoi(sel);
+            if(val == sheetId) return 1;
+            if(val == (int)(si + 1)) return 1;
+        } else {
+            if(wb->names && si < wb->n && wb->names[si] && strcmp(wb->names[si], sel) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
 /* Main worker: parse sharedStrings.xml, workbook.xml, and each sheet, then create tables and insert rows.
    Uses read_zip_file_sqlite() to fetch files from the archive.
+   New: accepts selectors array (sheet names or integers as strings) and selector_count.
+   Uses quoting for table and column identifiers instead of sanitization.
 */
-static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context *ctx){
+static int import_xlsx_to_db(sqlite3 *db, const char *filename, const char **selectors, int selector_count, sqlite3_context *ctx){
     if(!db || !filename){
         sqlite3_result_error(ctx, "Invalid arguments to import_xlsx_to_db", -1);
         return SQLITE_ERROR;
@@ -471,10 +511,15 @@ static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context 
         return SQLITE_ERROR;
     }
 
-    /* For each sheet in workbook, read corresponding sheet XML and import */
+    /* For each sheet in workbook, read corresponding sheet XML and import if selected */
     for(size_t si = 0; si < wb.n; ++si){
         const char *sheet_name_raw = wb.names[si];
         int sheetId = wb.sheetIds[si];
+
+        if(!should_import_sheet(&wb, si, sheetId, selectors, selector_count)){
+            continue; /* skip this sheet */
+        }
+
         char sheet_internal[256];
         snprintf(sheet_internal, sizeof(sheet_internal), "xl/worksheets/sheet%d.xml", sheetId);
 
@@ -517,17 +562,18 @@ static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context 
         free(sheet_buf);
 
         if(rows.n == 0){
-            char *tblname = sanitize_identifier(sheet_name_raw);
+            char *tblq = quote_identifier(sheet_name_raw);
+            if(!tblq) { sheet_rows_free(&rows); continue; }
             char sql[1024];
-            snprintf(sql, sizeof(sql), "CREATE TABLE IF NOT EXISTS \"%s\" (rowid INTEGER PRIMARY KEY);", tblname);
+            snprintf(sql, sizeof(sql), "CREATE TABLE IF NOT EXISTS %s (rowid INTEGER PRIMARY KEY);", tblq);
             char *errmsg = NULL;
             if(sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK){
                 sqlite3_free(errmsg);
-                free(tblname);
+                free(tblq);
                 sheet_rows_free(&rows);
                 continue;
             }
-            free(tblname);
+            free(tblq);
             tables_created++;
             sheet_rows_free(&rows);
             continue;
@@ -540,39 +586,49 @@ static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context 
         for(size_t r=0;r<rows.n;r++) if(rows.rows[r].rownum == min_rownum){ header_idx = r; break; }
 
         size_t ncols = rows.rows[header_idx].ncols;
+        /* Use raw header text as column names, but ensure uniqueness by appending suffixes when duplicates occur */
         char **colnames = (char**)malloc(sizeof(char*) * ncols);
         for(size_t c=0;c<ncols;c++){
             const char *raw = (c < rows.rows[header_idx].ncols && rows.rows[header_idx].cols[c]) ? rows.rows[header_idx].cols[c] : "";
             if(raw == NULL) raw = "";
-            char *san = sanitize_identifier(raw);
+            /* Start with raw header text (may be empty) */
+            char *candidate = strdup(raw);
             int suffix = 1;
-            char *unique = NULL;
             while(1){
                 int dup = 0;
                 for(size_t j=0;j<c;j++){
-                    if(strcmp(colnames[j], san) == 0){ dup = 1; break; }
+                    if(strcmp(colnames[j], candidate) == 0){ dup = 1; break; }
                 }
-                if(!dup) { unique = san; break; }
-                char tmp[512];
-                snprintf(tmp, sizeof(tmp), "%s_%d", san, suffix++);
-                free(san);
-                san = strdup(tmp);
+                if(!dup) break;
+                char tmp[1024];
+                snprintf(tmp, sizeof(tmp), "%s_%d", candidate, suffix++);
+                free(candidate);
+                candidate = strdup(tmp);
             }
-            colnames[c] = unique;
+            colnames[c] = candidate;
         }
 
-        char *tblname = sanitize_identifier(sheet_name_raw);
-        if(!tblname) tblname = strdup("sheet");
+        char *tblq = quote_identifier(sheet_name_raw);
+        if(!tblq){
+            for(size_t c=0;c<ncols;c++) free(colnames[c]);
+            free(colnames);
+            sheet_rows_free(&rows);
+            continue;
+        }
+
+        /* Build CREATE TABLE SQL using quoted identifiers */
         strbuf create_sql;
         sb_init(&create_sql);
-        sb_append(&create_sql, "CREATE TABLE IF NOT EXISTS \"");
-        sb_append(&create_sql, tblname);
-        sb_append(&create_sql, "\" (");
+        sb_append(&create_sql, "CREATE TABLE IF NOT EXISTS ");
+        sb_append(&create_sql, tblq);
+        sb_append(&create_sql, " (");
         for(size_t c=0;c<ncols;c++){
-            sb_append(&create_sql, "\"");
-            sb_append(&create_sql, colnames[c]);
-            sb_append(&create_sql, "\" TEXT");
+            char *colq = quote_identifier(colnames[c]);
+            if(!colq) colq = strdup("\"\""); /* fallback */
+            sb_append(&create_sql, colq);
+            sb_append(&create_sql, " TEXT");
             if(c+1 < ncols) sb_append(&create_sql, ", ");
+            free(colq);
         }
         sb_append(&create_sql, ");");
 
@@ -581,24 +637,25 @@ static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context 
             sqlite3_free(errmsg);
             for(size_t c=0;c<ncols;c++) free(colnames[c]);
             free(colnames);
-            free(tblname);
+            free(tblq);
             sb_free(&create_sql);
             sheet_rows_free(&rows);
             continue;
         }
         sb_free(&create_sql);
 
-        /* Prepare INSERT statement */
+        /* Prepare INSERT statement with quoted column names and parameter placeholders */
         strbuf insert_sql;
         sb_init(&insert_sql);
-        sb_append(&insert_sql, "INSERT INTO \"");
-        sb_append(&insert_sql, tblname);
-        sb_append(&insert_sql, "\" (");
+        sb_append(&insert_sql, "INSERT INTO ");
+        sb_append(&insert_sql, tblq);
+        sb_append(&insert_sql, " (");
         for(size_t c=0;c<ncols;c++){
-            sb_append(&insert_sql, "\"");
-            sb_append(&insert_sql, colnames[c]);
-            sb_append(&insert_sql, "\"");
+            char *colq = quote_identifier(colnames[c]);
+            if(!colq) colq = strdup("\"\"");
+            sb_append(&insert_sql, colq);
             if(c+1 < ncols) sb_append(&insert_sql, ", ");
+            free(colq);
         }
         sb_append(&insert_sql, ") VALUES (");
         for(size_t c=0;c<ncols;c++){
@@ -611,7 +668,7 @@ static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context 
         if(sqlite3_prepare_v2(db, insert_sql.buf, -1, &stmt, NULL) != SQLITE_OK){
             for(size_t c=0;c<ncols;c++) free(colnames[c]);
             free(colnames);
-            free(tblname);
+            free(tblq);
             sb_free(&insert_sql);
             sheet_rows_free(&rows);
             continue;
@@ -637,7 +694,7 @@ static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context 
 
         for(size_t c=0;c<ncols;c++) free(colnames[c]);
         free(colnames);
-        free(tblname);
+        free(tblq);
         sheet_rows_free(&rows);
 
         tables_created++;
@@ -650,7 +707,13 @@ static int import_xlsx_to_db(sqlite3 *db, const char *filename, sqlite3_context 
     return SQLITE_OK;
 }
 
-/* SQLite user function wrapper: xlsx_import(filename) */
+/* SQLite user function wrapper: xlsx_import(filename, [sheet1, sheet2, ...])
+   - If only filename is provided, import all sheets.
+   - Additional parameters may be sheet names (string) or integers (sheet number or sheetId).
+   - Example:
+       SELECT xlsx_import('file.xlsx'); -- import all sheets
+       SELECT xlsx_import('file.xlsx', 'Sheet1', '3', 'Sheet 4'); -- import Sheet1, sheet number 3, and sheet named "Sheet 4"
+*/
 static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value **argv){
     sqlite3 *db = sqlite3_context_db_handle(context);
     if(argc < 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL){
@@ -662,7 +725,32 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
         sqlite3_result_error(context, "Invalid filename", -1);
         return;
     }
-    import_xlsx_to_db(db, (const char*)fname, context);
+
+    /* Collect selectors (argv[1]..argv[argc-1]) as strings */
+    int selector_count = 0;
+    const char **selectors = NULL;
+    if(argc > 1){
+        selector_count = argc - 1;
+        selectors = (const char**)malloc(sizeof(char*) * selector_count);
+        if(!selectors) selector_count = 0;
+        for(int i=1;i<argc;i++){
+            const unsigned char *v = sqlite3_value_text(argv[i]);
+            if(v){
+                selectors[i-1] = strdup((const char*)v);
+            } else {
+                selectors[i-1] = NULL;
+            }
+        }
+    }
+
+    /* Call main importer with selectors */
+    import_xlsx_to_db(db, (const char*)fname, selectors, selector_count, context);
+
+    /* free selectors */
+    if(selectors){
+        for(int i=0;i<selector_count;i++) if(selectors[i]) free((void*)selectors[i]);
+        free(selectors);
+    }
 }
 
 /* Extension entry point */
@@ -673,7 +761,7 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rout
     SQLITE_EXTENSION_INIT2(pApi);
     (void)pzErrMsg;
     int rc = SQLITE_OK;
-    rc = sqlite3_create_function(db, "xlsx_import", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, xlsx_import_func, NULL, NULL);
+    rc = sqlite3_create_function(db, "xlsx_import", -1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, xlsx_import_func, NULL, NULL);
     if(rc != SQLITE_OK) return rc;
     rc = sqlite3_create_function(db, "xlsx_import_version", 0, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, xlsx_import_version, NULL, NULL);
     return rc;
