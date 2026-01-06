@@ -5,7 +5,14 @@
 curl -C - --remote-name  https://sqlite.org/2025/sqlite-tools-linux-x64-3510100.zip
 unzip -u sqlite-tools-linux-x64-3510100.zip sqlite3
 
-echo -e "+++++++++++++++++++++++++++++++\nTesting xlsximport"
+echo -e "+++++++++++++++++++++++++++++++\nMinimal Testing of xlsximport and xlsxexport"
+for llm in opus gemini copilot opus_libxlsxwriter gemini_libxlsxwriter copilot_libxlsxwriter
+do
+  echo -e "-------------------------------\nLLM: ${llm}"
+  ./sqlite3 ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport.so" "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');" 'SELECT xlsx_import_version();' "SELECT * FROM sqlite_master WHERE type='table';" ".load ../${llm}/xlsxexport.so" "SELECT xlsx_export('validating_09_severalsheets_t_06.xlsx');" 'SELECT xlsx_export_version();'
+done
+
+echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsximport"
 for llm in opus gemini copilot
 do
   echo -e "-------------------------------\nLLM: ${llm}"
@@ -32,8 +39,8 @@ do
   done
 done
 
-echo -e "+++++++++++++++++++++++++++++++\nTesting xlsxexport"
-for llm in opus gemini copilot opus_libxlsxwriter copilot_libxlsxwriter
+echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsxexport"
+for llm in opus gemini copilot opus_libxlsxwriter gemini_libxlsxwriter copilot_libxlsxwriter
 do
   echo -e "-------------------------------\nLLM: ${llm}"
   #for i in ??_*_??.xlsx
@@ -63,6 +70,12 @@ do
 done
 
 exit
+
+# Minimal test of xlsx_import, xlsx_import_sheetnames, xlsx_import_version
+./sqlite3 ':memory:' '.mode box' '.load ../copilot/xlsximport.so' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');"
+
+# Minimal test of xlsx_import, xlsx_import_sheetnames, xlsx_import_version, xlsx_export, xlsx_export_version
+./sqlite3 ':memory:' '.mode box' '.load ../gemini/xlsximport.so' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');" 'SELECT xlsx_import_version();' "SELECT * FROM sqlite_master WHERE type='table';" '.load ../gemini/xlsxexport.so' "SELECT xlsx_export('validating_09_severalsheets_t_06.xlsx');" 'SELECT xlsx_export_version();'
 
 # An 80MB spreadsheet, but full of non-compliances: it needs to be read by Libreoffice and saved again, then it becomes 127MB.
 https://datacatalogfiles.worldbank.org/ddh-published/0037712/DR0095336/WDI_EXCEL_2025_12_19.zip
