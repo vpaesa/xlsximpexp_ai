@@ -1,15 +1,17 @@
 /*
-** PROMPTS USED:
-** Create in gemini/xlsxexport.c the C code for a SQLite extension named xlsxexport that 
-** contains a SQL function named xlsx_export that saves multiple tables 
-** as a single XLSX spreadsheet, with the sheet names equal to the table 
-** names, and the sheet headers in bold and with autofilter. The XLSX file 
-** is a ZIP archive with XML files inside. Use the zipfile extension to 
-** create this ZIP archive. Do not use any external library to write XML 
-** files. Warn if the Excel maximum cell size is exceeded.
-** Sanitize the sheet names to conform to Excel restrictions.
-** Add SQL function xlsx_export_version returning "2025-12-30 Gemini 3 Pro (High)".
-** Include as comments the prompts used.
+PROMPTS USED:
+Create in lsxexport.c the C code for a SQLite extension named xlsxexport that 
+contains a SQL function named xlsx_export that saves multiple tables 
+as a single XLSX spreadsheet, with the sheet names equal to the table 
+names, and the sheet headers in bold and with autofilter. 
+If invoked with only one parameter then exports all the tables in the schema
+The XLSX file is a ZIP archive with XML files inside. 
+Use the zipfile extension to create this ZIP archive. 
+Do not use any external library to write XML files. 
+Warn if the Excel maximum cell size is exceeded.
+Sanitize the sheet names to conform to Excel restrictions.
+Add SQL function xlsx_export_version returning "2025-12-30 Gemini 3 Pro (High)".
+Include as comments the prompts used.
 */
 
 #include <sqlite3ext.h>
@@ -218,8 +220,8 @@ static void generate_workbook_rels(StrBuf *sb, int num_sheets) {
 
 /* Main Export Function */
 static void xlsx_export(sqlite3_context *context, int argc, sqlite3_value **argv) {
-    if (argc < 2) {
-        sqlite3_result_error(context, "Usage: xlsx_export(filename, table_name1, ...)", -1);
+    if (argc < 1) {
+        sqlite3_result_error(context, "Usage: xlsx_export(filename [, table_name1, ...])", -1);
         return;
     }
 
@@ -245,9 +247,60 @@ static void xlsx_export(sqlite3_context *context, int argc, sqlite3_value **argv
         return;
     }
     
-    int num_sheets = argc - 1;
-    char **sheet_names = sqlite3_malloc(num_sheets * sizeof(char*));
+    int num_sheets = 0;
+    char **sheet_names = NULL;
+    char **table_names = NULL; /* To keep track of source table names */
     int t;
+    
+    if (argc == 1) {
+        /* Export all tables */
+        sqlite3_stmt *stmt;
+        rc = sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", -1, &stmt, NULL);
+        if (rc == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                num_sheets++;
+            }
+            sqlite3_finalize(stmt);
+        }
+        
+        if (num_sheets > 0) {
+            sheet_names = sqlite3_malloc(num_sheets * sizeof(char*));
+            table_names = sqlite3_malloc(num_sheets * sizeof(char*));
+            
+            rc = sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", -1, &stmt, NULL);
+            if (rc == SQLITE_OK) {
+                int idx = 0;
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char *tbl = (const char *)sqlite3_column_text(stmt, 0);
+                    table_names[idx] = sqlite3_mprintf("%s", tbl);
+                    sheet_names[idx] = sanitize_sheet_name(tbl);
+                    idx++;
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+    } else {
+        /* Export specified tables */
+        num_sheets = argc - 1;
+        sheet_names = sqlite3_malloc(num_sheets * sizeof(char*));
+        table_names = sqlite3_malloc(num_sheets * sizeof(char*));
+        
+        for (t = 0; t < num_sheets; t++) {
+            const char *tbl = (const char *)sqlite3_value_text(argv[t+1]);
+            table_names[t] = sqlite3_mprintf("%s", tbl);
+            sheet_names[t] = sanitize_sheet_name(tbl);
+        }
+    }
+    
+    if (num_sheets == 0) {
+        /* Nothing to export */
+        /* Cleanup zip table */
+        sql = sqlite3_mprintf("DROP TABLE \"%w\"", zip_table_name);
+        sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+        sqlite3_result_error(context, "No tables to export", -1);
+        return;
+    }
     
     /* Process structure bits */
     StrBuf sb;
@@ -271,10 +324,7 @@ static void xlsx_export(sqlite3_context *context, int argc, sqlite3_value **argv
     strbuf_free(&sb);
     
     /* 4. xl/workbook.xml & sheet names processing */
-    for (t = 0; t < num_sheets; t++) {
-        const char *tbl = (const char *)sqlite3_value_text(argv[t+1]);
-        sheet_names[t] = sanitize_sheet_name(tbl);
-    }
+    /* sheet_names already populated */
     
     strbuf_init(&sb);
     generate_workbook(&sb, num_sheets, sheet_names);
@@ -289,7 +339,7 @@ static void xlsx_export(sqlite3_context *context, int argc, sqlite3_value **argv
     
     /* 6. Process each table -> sheet */
     for (t = 0; t < num_sheets; t++) {
-        const char *tbl_in = (const char *)sqlite3_value_text(argv[t+1]);
+        const char *tbl_in = table_names[t];
         
         strbuf_init(&sb);
         strbuf_append(&sb, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n", -1);
@@ -422,8 +472,12 @@ static void xlsx_export(sqlite3_context *context, int argc, sqlite3_value **argv
     }
     
     /* Cleanup sheet info */
-    for (t = 0; t < num_sheets; t++) sqlite3_free(sheet_names[t]);
+    for (t = 0; t < num_sheets; t++) {
+        sqlite3_free(sheet_names[t]);
+        sqlite3_free(table_names[t]);
+    }
     sqlite3_free(sheet_names);
+    sqlite3_free(table_names);
     
     /* Close zip (DROP TABLE) */
     sql = sqlite3_mprintf("DROP TABLE \"%w\"", zip_table_name);
