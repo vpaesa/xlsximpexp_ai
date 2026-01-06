@@ -14,6 +14,7 @@ xl/sharedStrings.xml has in "sst:uniqueCount" a count of the number of unique st
 xl/worksheets/sheet1.xml has in "dimension:ref" the enclosing range of cells used
 Create a SQL function named xlsx_import that creates one table for each of the sheets in the XLSX files, table name equal to sheet name, and column names equal to the values in first row of the sheet.
 The first parameter is the XLSX filename. Subsequent optional parameters are sheet names or sheet numbers (1-based) to import.
+Add table valued SQL function named xlsx_import_sheetnames with parameter XLSX filename that returns the names of the sheets in the file
 Use expat for XML parsing. Add support for both shared and inline strings.
 Add SQL function xlsx_import_version returning "2025-12-30 Gemini 3 Pro (High)". Add all user prompts as comments.
 */
@@ -127,6 +128,15 @@ typedef struct {
     int count;
     int cap;
 } Workbook;
+
+static void workbook_free(Workbook *wb) {
+    int i;
+    for (i = 0; i < wb->count; i++) sqlite3_free(wb->sheets[i].name);
+    sqlite3_free(wb->sheets);
+    wb->sheets = NULL;
+    wb->count = 0;
+    wb->cap = 0;
+}
 
 static void workbook_start(void *userData, const char *name, const char **atts) {
     Workbook *wb = (Workbook *)userData;
@@ -461,8 +471,7 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
     /* Cleanup */
     for (i = 0; i < ss.count; i++) sqlite3_free(ss.strings[i]);
     sqlite3_free(ss.strings);
-    for (i = 0; i < wb.count; i++) sqlite3_free(wb.sheets[i].name);
-    sqlite3_free(wb.sheets);
+    workbook_free(&wb);
     
     sqlite3_result_int(context, sheets_imported);
 }
@@ -472,6 +481,161 @@ static void xlsx_import_version(sqlite3_context *context, int argc, sqlite3_valu
     (void)argc; (void)argv;
     sqlite3_result_text(context, "2025-12-30 Gemini 3 Pro (High)", -1, SQLITE_STATIC);
 }
+
+/* 
+** xlsx_import_sheetnames Table-Valued Function 
+*/
+typedef struct {
+    sqlite3_vtab base;
+    sqlite3 *db;
+} SheetNamesVtab;
+
+typedef struct {
+    sqlite3_vtab_cursor base;
+    Workbook wb;
+    int current_idx;
+} SheetNamesCursor;
+
+static int sheetnames_connect(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVtab, char **pzErr) {
+    (void)pAux; (void)argc; (void)argv; (void)pzErr;
+    int rc = sqlite3_declare_vtab(db, "CREATE TABLE x(sheet_num INTEGER, sheet_name TEXT, filename HIDDEN)");
+    if (rc != SQLITE_OK) return rc;
+    SheetNamesVtab *vtab = sqlite3_malloc(sizeof(SheetNamesVtab));
+    if (!vtab) return SQLITE_NOMEM;
+    memset(vtab, 0, sizeof(SheetNamesVtab));
+    vtab->db = db;
+    *ppVtab = &vtab->base;
+    return SQLITE_OK;
+}
+
+static int sheetnames_disconnect(sqlite3_vtab *vtab) {
+    sqlite3_free(vtab);
+    return SQLITE_OK;
+}
+
+static int sheetnames_open(sqlite3_vtab *vtab, sqlite3_vtab_cursor **ppCursor) {
+    (void)vtab;
+    SheetNamesCursor *cur = sqlite3_malloc(sizeof(SheetNamesCursor));
+    if (!cur) return SQLITE_NOMEM;
+    memset(cur, 0, sizeof(SheetNamesCursor));
+    *ppCursor = &cur->base;
+    return SQLITE_OK;
+}
+
+static int sheetnames_close(sqlite3_vtab_cursor *cur) {
+    SheetNamesCursor *pCur = (SheetNamesCursor *)cur;
+    workbook_free(&pCur->wb);
+    sqlite3_free(pCur);
+    return SQLITE_OK;
+}
+
+static int sheetnames_next(sqlite3_vtab_cursor *cur) {
+    SheetNamesCursor *pCur = (SheetNamesCursor *)cur;
+    pCur->current_idx++;
+    return SQLITE_OK;
+}
+
+static int sheetnames_column(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int i) {
+    SheetNamesCursor *pCur = (SheetNamesCursor *)cur;
+    if (i == 0) {
+        sqlite3_result_int(ctx, pCur->current_idx + 1);
+    } else if (i == 1) {
+        if (pCur->current_idx < pCur->wb.count) {
+            sqlite3_result_text(ctx, pCur->wb.sheets[pCur->current_idx].name, -1, SQLITE_TRANSIENT);
+        }
+    }
+    return SQLITE_OK;
+}
+
+static int sheetnames_rowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
+    SheetNamesCursor *pCur = (SheetNamesCursor *)cur;
+    *pRowid = pCur->current_idx + 1;
+    return SQLITE_OK;
+}
+
+static int sheetnames_eof(sqlite3_vtab_cursor *cur) {
+    SheetNamesCursor *pCur = (SheetNamesCursor *)cur;
+    return pCur->current_idx >= pCur->wb.count;
+}
+
+static int sheetnames_filter(sqlite3_vtab_cursor *cur, int idxNum, const char *idxStr, int argc, sqlite3_value **argv) {
+    (void)idxNum; (void)idxStr;
+    SheetNamesCursor *pCur = (SheetNamesCursor *)cur;
+    SheetNamesVtab *vtab = (SheetNamesVtab *)cur->pVtab;
+    
+    workbook_free(&pCur->wb);
+    pCur->current_idx = 0;
+    
+    if (argc < 1) {
+        vtab->base.zErrMsg = sqlite3_mprintf("xlsx_import_sheetnames requires a filename argument");
+        return SQLITE_ERROR;
+    }
+    
+    const char *fname = (const char *)sqlite3_value_text(argv[0]);
+    if (!fname) return SQLITE_ERROR;
+    
+    void *xml_data = NULL;
+    int xml_len = 0;
+    
+    int rc = get_zip_content(vtab->db, fname, "xl/workbook.xml", &xml_data, &xml_len);
+    if (rc != SQLITE_OK) {
+        vtab->base.zErrMsg = sqlite3_mprintf("Failed to read workbook from %s", fname);
+        return SQLITE_ERROR;
+    }
+    
+    XML_Parser parser = XML_ParserCreate(NULL);
+    XML_SetUserData(parser, &pCur->wb);
+    XML_SetElementHandler(parser, workbook_start, NULL);
+    if (XML_Parse(parser, xml_data, xml_len, 1) == XML_STATUS_ERROR) {
+        XML_ParserFree(parser);
+        sqlite3_free(xml_data);
+        return SQLITE_ERROR;
+    }
+    XML_ParserFree(parser);
+    sqlite3_free(xml_data);
+    
+    return SQLITE_OK;
+}
+
+static int sheetnames_bestindex(sqlite3_vtab *vtab, sqlite3_index_info *pIdxInfo) {
+    (void)vtab;
+    int i;
+    int filename_idx = -1;
+    
+    for (i = 0; i < pIdxInfo->nConstraint; i++) {
+        if (pIdxInfo->aConstraint[i].usable && pIdxInfo->aConstraint[i].iColumn == 2 && pIdxInfo->aConstraint[i].op == SQLITE_INDEX_CONSTRAINT_EQ) {
+            filename_idx = i;
+            break;
+        }
+    }
+    
+    if (filename_idx == -1) return SQLITE_CONSTRAINT;
+    
+    pIdxInfo->aConstraintUsage[filename_idx].argvIndex = 1;
+    pIdxInfo->aConstraintUsage[filename_idx].omit = 1;
+    pIdxInfo->estimatedCost = 1000.0;
+    pIdxInfo->estimatedRows = 10;
+    return SQLITE_OK;
+}
+
+static sqlite3_module sheetnamesModule = {
+    0,
+    sheetnames_connect,
+    sheetnames_connect,
+    sheetnames_bestindex,
+    sheetnames_disconnect,
+    sheetnames_disconnect,
+    sheetnames_open,
+    sheetnames_close,
+    sheetnames_filter,
+    sheetnames_next,
+    sheetnames_eof,
+    sheetnames_column,
+    sheetnames_rowid,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    /* xIntegrity missing in older sqlite? Added 0s for padding */
+};
+
 
 /* Init */
 #ifdef _WIN32
@@ -485,6 +649,9 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rout
     rc = sqlite3_create_function(db, "xlsx_import", -1, SQLITE_UTF8, NULL, xlsx_import_func, NULL, NULL);
     if (rc == SQLITE_OK) {
         rc = sqlite3_create_function(db, "xlsx_import_version", 0, SQLITE_UTF8, NULL, xlsx_import_version, NULL, NULL);
+    }
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_create_module(db, "xlsx_import_sheetnames", &sheetnamesModule, NULL);
     }
     
     return rc;
