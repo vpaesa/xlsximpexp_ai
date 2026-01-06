@@ -3,11 +3,12 @@ xlsximport.c - SQLite extension to import XLSX files
 
 Uses the SQLite zipfile extension to read XLSX archives and expat for XML
 parsing.
-Two SQL functions defined
+Three SQL functions defined
 xlsx_import() creates one table for each sheet in the XLSX file, with table name
 equal to sheet name, and column names equal to the values in the first row of
 the sheet. The first parameter is the XLSX filename. Subsequent optional parameters
-are sheet names or sheet numbers (1-based) to import.
+are sheet names or sheet numbers (1-based) to import. The return value is the number of sheets imported.
+xlsx_import_sheetnames() is a table-valued function that returns the names of the sheets in the file.
 xlsx_import_version() returns the version string.
 
 Usage:
@@ -16,6 +17,7 @@ SELECT xlsx_import('filename.xlsx');  -- Import all sheets
 SELECT xlsx_import('filename.xlsx', 'Sheet1', 'Sheet2');  -- Import specific sheets by name
 SELECT xlsx_import('filename.xlsx', 1, 3);  -- Import sheets by number (1-based)
 SELECT xlsx_import('filename.xlsx', 'Sheet1', 2);  -- Mix of names and numbers
+SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('filename.xlsx');
 SELECT xlsx_import_version();
 **
 ** ============================================================================
@@ -919,6 +921,246 @@ static void xlsx_import_version_func(sqlite3_context *ctx, int argc,
 
 /*
 ** ============================================================================
+** Table-Valued Function: xlsx_import_sheetnames
+** ============================================================================
+**
+** Returns the sheet names from an XLSX file as a table with columns:
+**   sheet_num  - 1-based sheet number
+**   sheet_name - Name of the sheet
+**
+** Usage:
+**   SELECT * FROM xlsx_import_sheetnames('filename.xlsx');
+*/
+
+/* Virtual table cursor structure */
+typedef struct sheetnames_cursor {
+  sqlite3_vtab_cursor base; /* Base class - must be first */
+  Workbook wb;              /* Parsed workbook with sheet info */
+  int current;              /* Current row index (0-based) */
+  int eof;                  /* True if past last row */
+} sheetnames_cursor;
+
+/* Virtual table structure */
+typedef struct sheetnames_vtab {
+  sqlite3_vtab base; /* Base class - must be first */
+  sqlite3 *db;       /* Database connection */
+} sheetnames_vtab;
+
+/* xConnect/xCreate - Create a new virtual table instance */
+static int sheetnamesConnect(sqlite3 *db, void *pAux, int argc,
+                             const char *const *argv, sqlite3_vtab **ppVtab,
+                             char **pzErr) {
+  (void)pAux;
+  (void)argc;
+  (void)argv;
+  (void)pzErr;
+
+  int rc = sqlite3_declare_vtab(
+      db, "CREATE TABLE x(sheet_num INTEGER, sheet_name TEXT, "
+          "filename HIDDEN)");
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  sheetnames_vtab *pNew = sqlite3_malloc(sizeof(*pNew));
+  if (!pNew) {
+    return SQLITE_NOMEM;
+  }
+  memset(pNew, 0, sizeof(*pNew));
+  pNew->db = db;
+
+  *ppVtab = &pNew->base;
+  return SQLITE_OK;
+}
+
+/* xDisconnect/xDestroy - Destroy virtual table instance */
+static int sheetnamesDisconnect(sqlite3_vtab *pVtab) {
+  sqlite3_free(pVtab);
+  return SQLITE_OK;
+}
+
+/* xOpen - Create a new cursor */
+static int sheetnamesOpen(sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCursor) {
+  (void)pVtab;
+
+  sheetnames_cursor *pCur = sqlite3_malloc(sizeof(*pCur));
+  if (!pCur) {
+    return SQLITE_NOMEM;
+  }
+  memset(pCur, 0, sizeof(*pCur));
+
+  *ppCursor = &pCur->base;
+  return SQLITE_OK;
+}
+
+/* xClose - Close and free a cursor */
+static int sheetnamesClose(sqlite3_vtab_cursor *cur) {
+  sheetnames_cursor *pCur = (sheetnames_cursor *)cur;
+  wb_free(&pCur->wb);
+  sqlite3_free(pCur);
+  return SQLITE_OK;
+}
+
+/* xNext - Advance cursor to next row */
+static int sheetnamesNext(sqlite3_vtab_cursor *cur) {
+  sheetnames_cursor *pCur = (sheetnames_cursor *)cur;
+  pCur->current++;
+  if (pCur->current >= pCur->wb.count) {
+    pCur->eof = 1;
+  }
+  return SQLITE_OK;
+}
+
+/* xColumn - Return value for column iCol of current row */
+static int sheetnamesColumn(sqlite3_vtab_cursor *cur, sqlite3_context *ctx,
+                            int iCol) {
+  sheetnames_cursor *pCur = (sheetnames_cursor *)cur;
+
+  if (pCur->current >= pCur->wb.count) {
+    sqlite3_result_null(ctx);
+    return SQLITE_OK;
+  }
+
+  switch (iCol) {
+  case 0: /* sheet_num (1-based) */
+    sqlite3_result_int(ctx, pCur->current + 1);
+    break;
+  case 1: /* sheet_name */
+    sqlite3_result_text(ctx, pCur->wb.sheets[pCur->current].name, -1,
+                        SQLITE_TRANSIENT);
+    break;
+  default:
+    sqlite3_result_null(ctx);
+    break;
+  }
+  return SQLITE_OK;
+}
+
+/* xRowid - Return rowid for current row */
+static int sheetnamesRowid(sqlite3_vtab_cursor *cur, sqlite3_int64 *pRowid) {
+  sheetnames_cursor *pCur = (sheetnames_cursor *)cur;
+  *pRowid = pCur->current + 1;
+  return SQLITE_OK;
+}
+
+/* xEof - Return true if cursor is past last row */
+static int sheetnamesEof(sqlite3_vtab_cursor *cur) {
+  sheetnames_cursor *pCur = (sheetnames_cursor *)cur;
+  return pCur->eof;
+}
+
+/* xFilter - Begin a search; parse the XLSX file */
+static int sheetnamesFilter(sqlite3_vtab_cursor *cur, int idxNum,
+                            const char *idxStr, int argc,
+                            sqlite3_value **argv) {
+  (void)idxNum;
+  (void)idxStr;
+
+  sheetnames_cursor *pCur = (sheetnames_cursor *)cur;
+  sheetnames_vtab *pVtab = (sheetnames_vtab *)cur->pVtab;
+
+  /* Free any previous workbook data */
+  wb_free(&pCur->wb);
+  pCur->current = 0;
+  pCur->eof = 0;
+
+  if (argc < 1) {
+    pVtab->base.zErrMsg =
+        sqlite3_mprintf("xlsx_import_sheetnames requires a filename argument");
+    return SQLITE_ERROR;
+  }
+
+  const char *filename = (const char *)sqlite3_value_text(argv[0]);
+  if (!filename) {
+    pVtab->base.zErrMsg = sqlite3_mprintf("Invalid filename");
+    return SQLITE_ERROR;
+  }
+
+  /* Read workbook.xml to get sheet names */
+  char *wb_data = NULL;
+  int wb_len = 0;
+  int rc =
+      read_zip_entry(pVtab->db, filename, "xl/workbook.xml", &wb_data, &wb_len);
+  if (rc != SQLITE_OK || !wb_data) {
+    pVtab->base.zErrMsg = sqlite3_mprintf("Failed to read workbook from %s", filename);
+    return SQLITE_ERROR;
+  }
+
+  if (parse_workbook(wb_data, wb_len, &pCur->wb) != 0) {
+    free(wb_data);
+    pVtab->base.zErrMsg = sqlite3_mprintf("Failed to parse workbook");
+    return SQLITE_ERROR;
+  }
+  free(wb_data);
+
+  /* Check if we have any sheets */
+  if (pCur->wb.count == 0) {
+    pCur->eof = 1;
+  }
+
+  return SQLITE_OK;
+}
+
+/* xBestIndex - Determine query plan; require filename parameter */
+static int sheetnames_BestIndex(sqlite3_vtab *pVtab,
+                                sqlite3_index_info *pIdxInfo) {
+  (void)pVtab;
+
+  /* Look for equality constraint on filename (column 2, the hidden column) */
+  int filenameIdx = -1;
+  for (int i = 0; i < pIdxInfo->nConstraint; i++) {
+    if (pIdxInfo->aConstraint[i].usable &&
+        pIdxInfo->aConstraint[i].iColumn == 2 &&
+        pIdxInfo->aConstraint[i].op == SQLITE_INDEX_CONSTRAINT_EQ) {
+      filenameIdx = i;
+      break;
+    }
+  }
+
+  if (filenameIdx < 0) {
+    /* Filename is required */
+    return SQLITE_CONSTRAINT;
+  }
+
+  pIdxInfo->aConstraintUsage[filenameIdx].argvIndex = 1;
+  pIdxInfo->aConstraintUsage[filenameIdx].omit = 1;
+  pIdxInfo->estimatedCost = 1000.0;
+  pIdxInfo->estimatedRows = 10;
+
+  return SQLITE_OK;
+}
+
+/* Virtual table module definition */
+static sqlite3_module sheetnamesModule = {
+    0,                    /* iVersion */
+    sheetnamesConnect,    /* xCreate */
+    sheetnamesConnect,    /* xConnect */
+    sheetnames_BestIndex, /* xBestIndex */
+    sheetnamesDisconnect, /* xDisconnect */
+    sheetnamesDisconnect, /* xDestroy */
+    sheetnamesOpen,       /* xOpen */
+    sheetnamesClose,      /* xClose */
+    sheetnamesFilter,     /* xFilter */
+    sheetnamesNext,       /* xNext */
+    sheetnamesEof,        /* xEof */
+    sheetnamesColumn,     /* xColumn */
+    sheetnamesRowid,      /* xRowid */
+    0,                    /* xUpdate */
+    0,                    /* xBegin */
+    0,                    /* xSync */
+    0,                    /* xCommit */
+    0,                    /* xRollback */
+    0,                    /* xFindFunction */
+    0,                    /* xRename */
+    0,                    /* xSavepoint */
+    0,                    /* xRelease */
+    0,                    /* xRollbackTo */
+    0,                    /* xShadowName */
+    0                     /* xIntegrity */
+};
+
+/*
+** ============================================================================
 ** Extension Entry Point
 ** ============================================================================
 */
@@ -942,6 +1184,12 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg,
   rc = sqlite3_create_function(db, "xlsx_import_version", 0,
                                SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL,
                                xlsx_import_version_func, NULL, NULL);
+  if (rc != SQLITE_OK)
+    return rc;
+
+  /* Register xlsx_import_sheetnames as an eponymous table-valued function */
+  rc = sqlite3_create_module(db, "xlsx_import_sheetnames", &sheetnamesModule,
+                             NULL);
 
   return rc;
 }
