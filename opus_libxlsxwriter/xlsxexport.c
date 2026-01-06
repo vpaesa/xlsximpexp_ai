@@ -1,41 +1,42 @@
 /*
-** PROMPTS USED:
-** 
-** "create the C code for a SQLite extension named xlsxexport using the 
-** libXLSXwriter library that contains a SQL function named xlsx_export 
-** that saves multiple tables as a single XLSX spreadsheet, with the 
-** sheet names equal to the table names, and the sheet headers in bold 
-** and with autofilter. Include as comments the commands to cross compile 
-** on Cygwin statically the extension and libXLSXwriter. Include as 
-** comments the prompts used."
-**
-** CROSS-COMPILATION ON CYGWIN (static build):
-**
-** 1. Build libxlsxwriter statically:
-**    cd libxlsxwriter
-**    make USE_SYSTEM_MINIZIP=0 USE_STANDARD_TMPFILE=1 CFLAGS="-fPIC"
-**
-** 2. Compile the extension (adjust paths as needed):
-**    x86_64-w64-mingw32-gcc -shared -o xlsxexport.dll xlsxexport.c \
-**        -I/path/to/libxlsxwriter/include \
-**        -I/path/to/sqlite3 \
-**        -L/path/to/libxlsxwriter/lib \
-**        -l:libxlsxwriter.a -lz \
-**        -static-libgcc -static
-**
-** 3. Alternative single command with inline paths:
-**    x86_64-w64-mingw32-gcc -shared -fPIC -o xlsxexport.dll xlsxexport.c \
-**        -I./libxlsxwriter/include \
-**        -L./libxlsxwriter/lib \
-**        -Wl,-Bstatic -lxlsxwriter -lz \
-**        -Wl,-Bdynamic \
-**        -DSQLITE_CORE
-**
-** USAGE IN SQLITE:
-**    .load xlsxexport
-**    SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
-**    -- or with a single table:
-**    SELECT xlsx_export('output.xlsx', 'mytable');
+PROMPTS USED:
+Create the C code for a SQLite extension named xlsxexport using the 
+libXLSXwriter library that contains a SQL function named xlsx_export 
+that saves multiple tables as a single XLSX spreadsheet, with the 
+sheet names equal to the table names, and the sheet headers in bold 
+and with autofilter. If invoked with only one parameter then exports all the tables in the schema
+Include as comments the commands to cross compile 
+on Cygwin statically the extension and libXLSXwriter. Include as 
+comments the prompts used.
+
+CROSS-COMPILATION ON CYGWIN (static build):
+
+1. Build libxlsxwriter statically:
+    cd libxlsxwriter
+    make USE_SYSTEM_MINIZIP=0 USE_STANDARD_TMPFILE=1 CFLAGS="-fPIC"
+
+2. Compile the extension (adjust paths as needed):
+    x86_64-w64-mingw32-gcc -shared -o xlsxexport.dll xlsxexport.c \
+        -I/path/to/libxlsxwriter/include \
+        -I/path/to/sqlite3 \
+        -L/path/to/libxlsxwriter/lib \
+        -l:libxlsxwriter.a -lz \
+        -static-libgcc -static
+
+3. Alternative single command with inline paths:
+    x86_64-w64-mingw32-gcc -shared -fPIC -o xlsxexport.dll xlsxexport.c \
+        -I./libxlsxwriter/include \
+        -L./libxlsxwriter/lib \
+        -Wl,-Bstatic -lxlsxwriter -lz \
+        -Wl,-Bdynamic \
+        -DSQLITE_CORE
+
+USAGE IN SQLITE:
+    .load xlsxexport
+    SELECT xlsx_export('output.xlsx');  -- Export all tables in the schema
+    SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
+    -- or with a single table:
+    SELECT xlsx_export('output.xlsx', 'mytable');
 */
 
 #include <stdio.h>
@@ -173,11 +174,12 @@ static int export_table_to_sheet(
 }
 
 /*
-** SQL function: xlsx_export(filename, table1, table2, ...)
+** SQL function: xlsx_export(filename [, table1, table2, ...])
 **
-** Exports one or more tables to an XLSX file.
+** Exports tables to an XLSX file.
 ** The first argument is the output filename.
-** Subsequent arguments are table names to export.
+** If no table names are provided, all tables in the schema are exported.
+** If table names are provided, only those tables are exported.
 ** Each table becomes a separate worksheet with the table name as sheet name.
 ** Headers are bold and have autofilter enabled.
 **
@@ -196,10 +198,10 @@ static void xlsx_export_func(
     int i;
     lxw_error error;
     
-    /* Need at least filename and one table name */
-    if (argc < 2) {
+    /* Need at least the filename */
+    if (argc < 1) {
         sqlite3_result_error(context, 
-            "xlsx_export requires at least 2 arguments: filename and table name(s)", -1);
+            "xlsx_export requires at least 1 argument: filename", -1);
         return;
     }
     
@@ -220,23 +222,61 @@ static void xlsx_export_func(
         return;
     }
     
-    /* Export each table */
-    for (i = 1; i < argc; i++) {
-        const char *table_name;
+    if (argc == 1) {
+        /* No table names provided - export all tables from schema */
+        sqlite3_stmt *stmt = NULL;
+        int rc;
         
-        if (sqlite3_value_type(argv[i]) != SQLITE_TEXT) {
-            sqlite3_result_error(context, "Table names must be strings", -1);
+        /* Query sqlite_master for all user tables (exclude sqlite_ internal tables) */
+        rc = sqlite3_prepare_v2(db, 
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY rowid", 
+            -1, &stmt, NULL);
+        
+        if (rc != SQLITE_OK) {
+            sqlite3_result_error(context, "Failed to query schema for table names", -1);
             workbook_close(workbook);
             return;
         }
         
-        table_name = (const char *)sqlite3_value_text(argv[i]);
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            const char *table_name = (const char *)sqlite3_column_text(stmt, 0);
+            
+            if (export_table_to_sheet(db, workbook, table_name, &err_msg) != 0) {
+                sqlite3_result_error(context, err_msg, -1);
+                sqlite3_free(err_msg);
+                sqlite3_finalize(stmt);
+                workbook_close(workbook);
+                return;
+            }
+        }
         
-        if (export_table_to_sheet(db, workbook, table_name, &err_msg) != 0) {
-            sqlite3_result_error(context, err_msg, -1);
-            sqlite3_free(err_msg);
+        sqlite3_finalize(stmt);
+        
+        if (rc != SQLITE_DONE) {
+            sqlite3_result_error(context, "Error enumerating tables", -1);
             workbook_close(workbook);
             return;
+        }
+    } else {
+        /* Export specified tables */
+        for (i = 1; i < argc; i++) {
+            const char *table_name;
+            
+            if (sqlite3_value_type(argv[i]) != SQLITE_TEXT) {
+                sqlite3_result_error(context, "Table names must be strings", -1);
+                workbook_close(workbook);
+                return;
+            }
+            
+            table_name = (const char *)sqlite3_value_text(argv[i]);
+            
+            if (export_table_to_sheet(db, workbook, table_name, &err_msg) != 0) {
+                sqlite3_result_error(context, err_msg, -1);
+                sqlite3_free(err_msg);
+                workbook_close(workbook);
+                return;
+            }
         }
     }
     
