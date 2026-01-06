@@ -1,20 +1,21 @@
 /*
-** PROMPTS USED:
-**
-** in folder gemini, create C code for a SQLite extension named xlsximport. This xlsximport code uses the SQLite extension zipfile to open a XLSX file and gather this content:
-**     xl/sharedStrings.xml
-**     xl/worksheets/sheet1.xml to  xl/worksheets/sheetN.xml
-**     xl/workbook.xml
-** The name of each sheet is in xl/workbook.xml
-** The individual sheets are kept in xl/worksheets/sheet1.xml  to  xl/worksheets/sheetN.xml
-** To save on space, Microsoft stores all the character literal values in one common xl/sharedStrings.xml dictionary file. The individual cell value found for this string in the actual sheet1.xml file is just an index into this dictionary.
-** Microsoft does not store empty cells or rows in xl worksheets sheet1.xml, so any gaps between values have to be taken care by the code.
-** To figure out the number of skipped columns one need to be able to figure out the distance between, say, cell "AB67" and "C67". The way columns are named: A through Z, then AA through AZ, then AAA through AAZ, etc., suggests that we may assume they are using a base-26 system and therefore use a simple conversion method from a base-26 to the decimal system and then use subtraction to find out the number of empty cells between columns.
-** xl/sharedStrings.xml has in "sst:uniqueCount" a count of the number of unique strings
-** xl/worksheets/sheet1.xml has in "dimension:ref" the enclosing range of cells used
-** Create a SQL function named xlsx_import that creates one table for each of the sheets in the XLSX files, table name equal to sheet name, and column names equal to the values in first row of the sheet.
-** Use expat for XML parsing. Add support for both shared and inline strings.
-** Add SQL function xlsx_import_version returning "2025-12-30 Gemini 3 Pro (High)". Add all user prompts as comments.
+PROMPTS USED:
+
+Create C code for a SQLite extension named xlsximport. This xlsximport code uses the SQLite extension zipfile to open a XLSX file and gather this content:
+     xl/sharedStrings.xml
+     xl/worksheets/sheet1.xml to  xl/worksheets/sheetN.xml
+     xl/workbook.xml
+The name of each sheet is in xl/workbook.xml
+The individual sheets are kept in xl/worksheets/sheet1.xml  to  xl/worksheets/sheetN.xml
+To save on space, Microsoft stores all the character literal values in one common xl/sharedStrings.xml dictionary file. The individual cell value found for this string in the actual sheet1.xml file is just an index into this dictionary.
+Microsoft does not store empty cells or rows in xl worksheets sheet1.xml, so any gaps between values have to be taken care by the code.
+To figure out the number of skipped columns one need to be able to figure out the distance between, say, cell "AB67" and "C67". The way columns are named: A through Z, then AA through AZ, then AAA through AAZ, etc., suggests that we may assume they are using a base-26 system and therefore use a simple conversion method from a base-26 to the decimal system and then use subtraction to find out the number of empty cells between columns.
+xl/sharedStrings.xml has in "sst:uniqueCount" a count of the number of unique strings
+xl/worksheets/sheet1.xml has in "dimension:ref" the enclosing range of cells used
+Create a SQL function named xlsx_import that creates one table for each of the sheets in the XLSX files, table name equal to sheet name, and column names equal to the values in first row of the sheet.
+The first parameter is the XLSX filename. Subsequent optional parameters are sheet names or sheet numbers (1-based) to import.
+Use expat for XML parsing. Add support for both shared and inline strings.
+Add SQL function xlsx_import_version returning "2025-12-30 Gemini 3 Pro (High)". Add all user prompts as comments.
 */
 
 #include <sqlite3ext.h>
@@ -244,7 +245,6 @@ static void sheet_end(void *userData, const char *name) {
         ctx->in_c = 0;
         char *val = ctx->cell_val.data; /* can be NULL */
         char *final_val = NULL;
-        int must_free = 0;
 
         if (val) {
              if (strcmp(ctx->cell_type, "s") == 0) {
@@ -374,8 +374,30 @@ static int get_zip_content(sqlite3 *db, const char *zipname, const char *filenam
     return rc;
 }
 
+/* Helper to check if a sheet should be imported */
+static int should_import(int argc, sqlite3_value **argv, int sheet_idx, const char *sheet_name) {
+    if (argc <= 1) return 1; /* Import all if no extra args */
+    
+    int i;
+    for (i = 1; i < argc; i++) {
+        int type = sqlite3_value_type(argv[i]);
+        if (type == SQLITE_INTEGER) {
+            int req_idx = sqlite3_value_int(argv[i]);
+            if (req_idx == sheet_idx + 1) return 1;
+        } else if (type == SQLITE_TEXT) {
+            const char *req_name = (const char *)sqlite3_value_text(argv[i]);
+            if (req_name && strcmp(req_name, sheet_name) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
 /* Main Function */
 static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    if (argc < 1) {
+        sqlite3_result_error(context, "xlsx_import requires at least 1 argument", -1);
+        return;
+    }
     const char *fname = (const char *)sqlite3_value_text(argv[0]);
     sqlite3 *db = sqlite3_context_db_handle(context);
     
@@ -407,7 +429,10 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
     
     /* 3. Process Sheets */
     int i;
+    int sheets_imported = 0;
     for (i = 0; i < wb.count; i++) {
+        if (!should_import(argc, argv, i, wb.sheets[i].name)) continue;
+
         char sheet_info_path[64];
         /* Assume sequential numbering based on requirement "xl/worksheets/sheet1.xml to ...sheetN.xml" */
         /* Using the index from loop + 1 matches strict sequential file naming regardless of internal relationship IDs */
@@ -429,6 +454,7 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
             sqlite3_free(xml_data);
             strbuf_free(&ctx.header_cols);
             strbuf_free(&ctx.sql_buf);
+            sheets_imported++;
         }
     }
     
@@ -437,6 +463,8 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
     sqlite3_free(ss.strings);
     for (i = 0; i < wb.count; i++) sqlite3_free(wb.sheets[i].name);
     sqlite3_free(wb.sheets);
+    
+    sqlite3_result_int(context, sheets_imported);
 }
 
 /* Version Function */
@@ -454,7 +482,7 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rout
     SQLITE_EXTENSION_INIT2(pApi);
     (void)pzErrMsg;
     
-    rc = sqlite3_create_function(db, "xlsx_import", 1, SQLITE_UTF8, NULL, xlsx_import_func, NULL, NULL);
+    rc = sqlite3_create_function(db, "xlsx_import", -1, SQLITE_UTF8, NULL, xlsx_import_func, NULL, NULL);
     if (rc == SQLITE_OK) {
         rc = sqlite3_create_function(db, "xlsx_import_version", 0, SQLITE_UTF8, NULL, xlsx_import_version, NULL, NULL);
     }
