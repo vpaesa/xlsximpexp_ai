@@ -2,11 +2,11 @@
 
 # Compiler settings
 CC ?= gcc
-CFLAGS ?= -O2 -fPIC -Wall -Wextra -I../../sqlite-amalgamation-3510100
+CFLAGS ?= -O2 -fPIC -Wall -Wextra -I../../sqlite-amalgamation-3510200
 
 # Cross-compiler for Windows 64-bit (MinGW-w64)
 CC_WIN64 ?= x86_64-w64-mingw32-gcc
-CFLAGS_WIN64 ?= -O2 -Wall -Wextra -I../../sqlite-amalgamation-3510100
+CFLAGS_WIN64 ?= -O2 -Wall -Wextra -I../../sqlite-amalgamation-3510200
 
 ifeq ($(OS),Windows_NT)
     SHARED_EXT = .dll
