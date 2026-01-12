@@ -5,9 +5,11 @@ libXLSXwriter library that contains a SQL function named xlsx_export
 that saves multiple tables as a single XLSX spreadsheet, with the 
 sheet names equal to the table names, and the sheet headers in bold 
 and with autofilter. If invoked with only one parameter then exports all the tables in the schema
-Include as comments the commands to cross compile 
-on Cygwin statically the extension and libXLSXwriter. Include as 
-comments the prompts used.
+xlsx_export returns the number of tables imported.
+Include as comments the commands to cross compile
+on Cygwin statically the extension and libXLSXwriter.
+Add SQL function xlsx_export_version returning "2026-01-07 Claude Opus 4.5 (Thinking)".
+Include as comments the prompts used.
 
 CROSS-COMPILATION ON CYGWIN (static build):
 
@@ -37,6 +39,8 @@ USAGE IN SQLITE:
     SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
     -- or with a single table:
     SELECT xlsx_export('output.xlsx', 'mytable');
+    SELECT xlsx_export_version();
+
 */
 
 #include <stdio.h>
@@ -197,6 +201,7 @@ static void xlsx_export_func(
     char *err_msg = NULL;
     int i;
     lxw_error error;
+    int exported_count = 0;
     
     /* Need at least the filename */
     if (argc < 1) {
@@ -249,6 +254,7 @@ static void xlsx_export_func(
                 workbook_close(workbook);
                 return;
             }
+            exported_count++;
         }
         
         sqlite3_finalize(stmt);
@@ -277,6 +283,7 @@ static void xlsx_export_func(
                 workbook_close(workbook);
                 return;
             }
+            exported_count++;
         }
     }
     
@@ -289,8 +296,8 @@ static void xlsx_export_func(
         return;
     }
     
-    /* Return the filename on success */
-    sqlite3_result_text(context, filename, -1, SQLITE_TRANSIENT);
+    /* Return the number of exported tables on success */
+    sqlite3_result_int(context, exported_count);
 }
 
 /*
@@ -305,7 +312,7 @@ static void xlsx_export_version(
 ) {
     (void)argc;
     (void)argv;
-    sqlite3_result_text(context, "2025-12-30 Claude Opus 4.5 (Thinking)", -1, SQLITE_STATIC);
+    sqlite3_result_text(context, "2026-01-07 Claude Opus 4.5 (Thinking)", -1, SQLITE_STATIC);
 }
 
 /*
