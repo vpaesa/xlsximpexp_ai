@@ -1,22 +1,24 @@
 /*
 PROMPTS USED:
-
-Create C code for a SQLite extension named xlsximport. This xlsximport code uses the SQLite extension zipfile to open a XLSX file and gather this content:
+in gemini/xlsximport.c create C code for a SQLite extension named xlsximport. This xlsximport code uses the SQLite extension zipfile to open a XLSX file and gather this content:
      xl/sharedStrings.xml
      xl/worksheets/sheet1.xml to  xl/worksheets/sheetN.xml
      xl/workbook.xml
 The name of each sheet is in xl/workbook.xml
 The individual sheets are kept in xl/worksheets/sheet1.xml  to  xl/worksheets/sheetN.xml
-To save on space, Microsoft stores all the character literal values in one common xl/sharedStrings.xml dictionary file. The individual cell value found for this string in the actual sheet1.xml file is just an index into this dictionary.
+To save on space, Microsoft stores all the character literal values in one common xl/sharedStrings.xml dictionary file. 
+The individual cell value found for this string in the actual sheet1.xml file is just an index into this dictionary.
 Microsoft does not store empty cells or rows in xl worksheets sheet1.xml, so any gaps between values have to be taken care by the code.
 To figure out the number of skipped columns one need to be able to figure out the distance between, say, cell "AB67" and "C67". The way columns are named: A through Z, then AA through AZ, then AAA through AAZ, etc., suggests that we may assume they are using a base-26 system and therefore use a simple conversion method from a base-26 to the decimal system and then use subtraction to find out the number of empty cells between columns.
-xl/sharedStrings.xml has in "sst:uniqueCount" a count of the number of unique strings
-xl/worksheets/sheet1.xml has in "dimension:ref" the enclosing range of cells used
 Create a SQL function named xlsx_import that creates one table for each of the sheets in the XLSX files, table name equal to sheet name, and column names equal to the values in first row of the sheet.
+xlsx_import returns the number of tables imported.
 The first parameter is the XLSX filename. Subsequent optional parameters are sheet names or sheet numbers (1-based) to import.
-Add table valued SQL function named xlsx_import_sheetnames with parameter XLSX filename that returns the names of the sheets in the file
-Use expat for XML parsing. Add support for both shared and inline strings.
-Add SQL function xlsx_import_version returning "2025-12-30 Gemini 3 Pro (High)". Add all user prompts as comments.
+Add table valued SQL function named xlsx_import_sheetnames with parameter XLSX filename that returns the names of the sheets in the file,
+declared as "CREATE TABLE x(sheet_num INTEGER, sheet_name TEXT, filename HIDDEN)"
+Use expat for XML parsing. Add support for both shared strings and inline strings.
+Support sparsely populated spreadsheets.
+Add SQL function xlsx_import_version returning "2026-01-07 Gemini 3 Pro (High)".
+Add all user prompts as comments.
 */
 
 #include <sqlite3ext.h>
@@ -105,6 +107,22 @@ static int col_to_int(const char *col) {
     return res;
 }
 
+static void int_to_col(int n, char *buf) {
+    char temp[16];
+    int i = 0;
+    n++; /* 1-based */
+    while (n > 0) {
+        n--;
+        temp[i++] = (char)('A' + (n % 26));
+        n /= 26;
+    }
+    int j;
+    for (j = 0; j < i; j++) {
+        buf[j] = temp[i - 1 - j];
+    }
+    buf[i] = '\0';
+}
+
 static void extract_col_row(const char *ref, int *col, int *row) {
     const char *p = ref;
     while (*p && isalpha(*p)) p++;
@@ -182,13 +200,37 @@ typedef struct {
     int header_row_processed;
     StrBuf header_cols; /* CSV of column names */
     int num_cols;
+    int dimension_max_col;
+    int dimension_max_row;
+    int last_row_inserted;
+    int table_created;
 } SheetCtx;
 
 static void sheet_start(void *userData, const char *name, const char **atts) {
     SheetCtx *ctx = (SheetCtx *)userData;
     int i;
-    
-    if (strcmp(name, "row") == 0) {
+
+    if (strcmp(name, "dimension") == 0) {
+        const char *ref = NULL;
+        for (i = 0; atts[i]; i += 2) {
+            if (strcmp(atts[i], "ref") == 0) ref = atts[i+1];
+        }
+        if (ref) {
+           /* ref is "A1" or "A1:C5" */
+           const char *p = strchr(ref, ':');
+           if (p) {
+               int c, r;
+               extract_col_row(p + 1, &c, &r);
+               ctx->dimension_max_col = c;
+               ctx->dimension_max_row = r;
+           } else {
+               int c, r;
+               extract_col_row(ref, &c, &r);
+               ctx->dimension_max_col = c;
+               ctx->dimension_max_row = r;
+           }
+        }
+    } else if (strcmp(name, "row") == 0) {
         ctx->in_row = 1;
         const char *r_attr = NULL;
         for (i = 0; atts[i]; i += 2) {
@@ -198,6 +240,28 @@ static void sheet_start(void *userData, const char *name, const char **atts) {
         ctx->current_col = 0; /* Convert 1..N to 0..N-1? No, col_to_int returns 1-based */
         
         if (ctx->header_row_processed) {
+            /* Handle Row Gaps */
+            while (ctx->last_row_inserted + 1 < ctx->current_row) {
+                ctx->last_row_inserted++;
+                strbuf_init(&ctx->sql_buf);
+                strbuf_append(&ctx->sql_buf, "INSERT INTO \"", -1);
+                strbuf_append(&ctx->sql_buf, ctx->table_name, -1);
+                strbuf_append(&ctx->sql_buf, "\" VALUES (", -1);
+                int k;
+                for (k = 0; k < ctx->num_cols; k++) {
+                    if (k > 0) strbuf_append(&ctx->sql_buf, ", ", 2);
+                    strbuf_append(&ctx->sql_buf, "NULL", 4);
+                }
+                strbuf_append(&ctx->sql_buf, ");", 2);
+                char *zErr = NULL;
+                int rc = sqlite3_exec(ctx->db, ctx->sql_buf.data, NULL, NULL, &zErr);
+                if (rc != SQLITE_OK) {
+                    fprintf(stderr, "xlsximport: row gap insert error: %s\n", zErr);
+                    sqlite3_free(zErr);
+                }
+                strbuf_free(&ctx->sql_buf);
+            }
+
             strbuf_init(&ctx->sql_buf);
             strbuf_append(&ctx->sql_buf, "INSERT INTO \"", -1);
             strbuf_append(&ctx->sql_buf, ctx->table_name, -1);
@@ -223,8 +287,29 @@ static void sheet_start(void *userData, const char *name, const char **atts) {
                      if (ctx->current_col == 0) gaps = c - 1; /* First cell in row */
                      
                      for (k = 0; k < gaps; k++) {
-                         if (ctx->current_col + k + 1 <= ctx->num_cols) /* Don't exceed table cols */
-                            strbuf_append(&ctx->sql_buf, "NULL, ", -1);
+                         if (ctx->current_col + k + 1 <= ctx->num_cols) {
+                             if (ctx->sql_buf.data[ctx->sql_buf.len-1] != '(') {
+                                 strbuf_append(&ctx->sql_buf, ", ", 2);
+                             }
+                             strbuf_append(&ctx->sql_buf, "NULL", 4);
+                         }
+                     }
+                } else {
+                     /* Header Row Gap Filling */
+                     int gaps = c - ctx->current_col - 1;
+                     if (ctx->current_col == 0) gaps = c - 1;
+                     
+                     int k;
+                     for (k = 0; k < gaps; k++) {
+                         if (ctx->header_cols.len > 0) strbuf_append(&ctx->header_cols, ", ", 2);
+                         char col_name[32];
+                         char letter[16];
+                         /* Determine column index being filled */
+                         int fill_idx = ctx->current_col + k; /* 0-based index of column */
+                         int_to_col(fill_idx, letter);
+                         snprintf(col_name, sizeof(col_name), "\"%s\"", letter);
+                         strbuf_append(&ctx->header_cols, col_name, -1);
+                         ctx->num_cols++;
                      }
                 }
                 ctx->current_col = c;
@@ -280,46 +365,6 @@ static void sheet_end(void *userData, const char *name) {
             strbuf_append(&ctx->header_cols, "\"", 1);
             ctx->num_cols++;
         } else {
-            /* Appending value to INSERT */
-            /* Escape quotes? For simplicity assume simple strings or use %Q equivalent logic? */
-            /* Since we output to sql_buf passed to sqlite3_exec, we should be careful. 
-               But generating CREATE TABLE and INSERT statements dynamically is what was asked.
-            */
-            /* Handle comma if not first */
-            /* Wait, the comma logic is in the gap filling + separate 'append' logic */
-            /* With gaps filled, we just append ", " before unless it's first? */
-            /* The gap filling handles PREVIOUS gaps. but doesn't add comma for THIS value? */
-            /* Simpler: always append ", " before value unless method to track start of values. */
-            /* Since gap loop adds "NULL, ", we need to know if we need a comma for the current val. */
-            
-            /* Actually, clearer approach: 
-               Buffer all values for the row in an array, then join? 
-               But memory... 
-               
-               Let's trust the gap logic + comma.
-               Structure: VAL, NULL, NULL, VAL
-               
-               If gap loop ran, it added "NULL, ".
-               Wait, the gap loop adds "NULL, ".
-               If it was the first col (gap from 0), it added NULLs.
-               We just need to ensure we add a comma if NOT the very first output.
-            */
-            /* Re-think: The comma should be added AFTER values, or before. 
-               SQL: VALUES (v1, v2, v3)
-               If cell is v1: append v1.
-               If next is v3 (skip v2): append ", NULL" then ", v3".
-               
-               So:
-               if (ctx->current_col > 1) strbuf_append(&ctx->sql_buf, ", ", 2); -- invalid if gaps handled.
-            */
-             
-             /* Correction: The gap loop adds "NULL, ". 
-                If current_col is 1, no comma before.
-                If current_col > 1, we need comma before THIS value, UNLESS the gap loop just ran and added trailing comma?
-                Gap loop: "NULL, ". So it leaves a trailing comma.
-                If NO gap loop ran (adjacent cells), we still need a comma.
-             */
-             
              /* Check if this is the first value being added to buffer? */
              /* Buffer starts with "VALUES (". */
              /* If data[len-1] != '(' implies we added something. */
@@ -337,22 +382,75 @@ static void sheet_end(void *userData, const char *name) {
     } else if (strcmp(name, "row") == 0) {
         ctx->in_row = 0;
         if (!ctx->header_row_processed) {
+            /* Check dimension max col */
+            if (ctx->dimension_max_col > ctx->num_cols) {
+                int k;
+                int start = ctx->num_cols;
+                int end = ctx->dimension_max_col;
+                for (k = start; k < end; k++) {
+                     if (ctx->header_cols.len > 0) strbuf_append(&ctx->header_cols, ", ", 2);
+                     char col_name[32];
+                     char letter[16];
+                     int_to_col(k, letter);
+                     snprintf(col_name, sizeof(col_name), "\"%s\"", letter);
+                     strbuf_append(&ctx->header_cols, col_name, -1);
+                     ctx->num_cols++;
+                }
+            }
+            
             /* Create table */
-            char *create_sql = sqlite3_mprintf("CREATE TABLE \"%w\" (%s);", ctx->table_name, ctx->header_cols.data);
-            sqlite3_exec(ctx->db, create_sql, NULL, NULL, NULL);
+            char *create_sql = sqlite3_mprintf("CREATE TABLE IF NOT EXISTS \"%w\" (%s);", ctx->table_name, ctx->header_cols.data);
+            int rc = sqlite3_exec(ctx->db, create_sql, NULL, NULL, NULL);
             sqlite3_free(create_sql);
+            if (rc == SQLITE_OK) {
+                ctx->table_created = 1;
+            }
             ctx->header_row_processed = 1;
+            ctx->last_row_inserted = ctx->current_row;
         } else {
             /* Fill trailing gaps? */
             /* If row ends at col 3 but table has 5 cols. */
             int k;
             for (k = ctx->current_col; k < ctx->num_cols; k++) {
-                strbuf_append(&ctx->sql_buf, ", NULL", -1);
+                if (ctx->sql_buf.data[ctx->sql_buf.len-1] != '(') {
+                    strbuf_append(&ctx->sql_buf, ", ", 2);
+                }
+                strbuf_append(&ctx->sql_buf, "NULL", 4);
             }
             
             strbuf_append(&ctx->sql_buf, ");", -1);
-            sqlite3_exec(ctx->db, ctx->sql_buf.data, NULL, NULL, NULL);
+            char *zErr = NULL;
+            int rc = sqlite3_exec(ctx->db, ctx->sql_buf.data, NULL, NULL, &zErr);
+            if (rc != SQLITE_OK) {
+                fprintf(stderr, "xlsximport: insert error on row %d: %s\n", ctx->current_row, zErr);
+                sqlite3_free(zErr);
+            }
             strbuf_free(&ctx->sql_buf);
+            ctx->last_row_inserted = ctx->current_row;
+        }
+    } else if (strcmp(name, "sheetData") == 0 || strcmp(name, "worksheet") == 0) {
+        /* Handle trailing rows after last <row> tag */
+        if (ctx->header_row_processed) {
+            while (ctx->last_row_inserted < ctx->dimension_max_row) {
+                ctx->last_row_inserted++;
+                strbuf_init(&ctx->sql_buf);
+                strbuf_append(&ctx->sql_buf, "INSERT INTO \"", -1);
+                strbuf_append(&ctx->sql_buf, ctx->table_name, -1);
+                strbuf_append(&ctx->sql_buf, "\" VALUES (", -1);
+                int k;
+                for (k = 0; k < ctx->num_cols; k++) {
+                    if (k > 0) strbuf_append(&ctx->sql_buf, ", ", 2);
+                    strbuf_append(&ctx->sql_buf, "NULL", 4);
+                }
+                strbuf_append(&ctx->sql_buf, ");", 2);
+                char *zErr = NULL;
+                int rc = sqlite3_exec(ctx->db, ctx->sql_buf.data, NULL, NULL, &zErr);
+                if (rc != SQLITE_OK) {
+                    fprintf(stderr, "xlsximport: trailing row insert error: %s\n", zErr);
+                    sqlite3_free(zErr);
+                }
+                strbuf_free(&ctx->sql_buf);
+            }
         }
     }
 }
@@ -360,7 +458,6 @@ static void sheet_end(void *userData, const char *name) {
 /* Helper to get file content from zipfile */
 static int get_zip_content(sqlite3 *db, const char *zipname, const char *filename, void **buf, int *len) {
     sqlite3_stmt *stmt;
-    //fprintf(stderr, "get_zip_content(%s, %s)\n", zipname, filename);
     char *sql = "SELECT data FROM zipfile(?) WHERE name = ?";
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) return rc;
@@ -379,7 +476,6 @@ static int get_zip_content(sqlite3 *db, const char *zipname, const char *filenam
     } else {
         rc = SQLITE_ERROR;
     }
-    //fprintf(stderr, "get_zip_content(%d)\n", *len);
     sqlite3_finalize(stmt);
     return rc;
 }
@@ -445,7 +541,6 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
 
         char sheet_info_path[64];
         /* Assume sequential numbering based on requirement "xl/worksheets/sheet1.xml to ...sheetN.xml" */
-        /* Using the index from loop + 1 matches strict sequential file naming regardless of internal relationship IDs */
         snprintf(sheet_info_path, sizeof(sheet_info_path), "xl/worksheets/sheet%d.xml", i+1);
         
         if (get_zip_content(db, fname, sheet_info_path, &xml_data, &xml_len) == SQLITE_OK) {
@@ -461,10 +556,13 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
             XML_Parse(parser, xml_data, xml_len, 1);
             XML_ParserFree(parser);
             
+            if (ctx.table_created) {
+                sheets_imported++;
+            }
+
             sqlite3_free(xml_data);
             strbuf_free(&ctx.header_cols);
             strbuf_free(&ctx.sql_buf);
-            sheets_imported++;
         }
     }
     
@@ -479,7 +577,7 @@ static void xlsx_import_func(sqlite3_context *context, int argc, sqlite3_value *
 /* Version Function */
 static void xlsx_import_version(sqlite3_context *context, int argc, sqlite3_value **argv) {
     (void)argc; (void)argv;
-    sqlite3_result_text(context, "2025-12-30 Gemini 3 Pro (High)", -1, SQLITE_STATIC);
+    sqlite3_result_text(context, "2026-01-07 Gemini 3 Pro (High)", -1, SQLITE_STATIC);
 }
 
 /* 
@@ -579,6 +677,11 @@ static int sheetnames_filter(sqlite3_vtab_cursor *cur, int idxNum, const char *i
     
     int rc = get_zip_content(vtab->db, fname, "xl/workbook.xml", &xml_data, &xml_len);
     if (rc != SQLITE_OK) {
+        /* If we can't read workbook.xml, maybe the file doesn't exist or isn't a valid xlsx/zip. */
+        /* For a vtab filter, returning ERROR might break the query hard. 
+           Should we return OK with empty set? 
+           Let's return error to inform user.
+        */
         vtab->base.zErrMsg = sqlite3_mprintf("Failed to read workbook from %s", fname);
         return SQLITE_ERROR;
     }
@@ -633,9 +736,7 @@ static sqlite3_module sheetnamesModule = {
     sheetnames_column,
     sheetnames_rowid,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-    /* xIntegrity missing in older sqlite? Added 0s for padding */
 };
-
 
 /* Init */
 #ifdef _WIN32
