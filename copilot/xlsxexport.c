@@ -1,30 +1,71 @@
 /*
 Prompts used (included per user request):
 
-Prompt 1:
+Create the C code for a SQLite extension named xlsxexport that contains a SQL function named xlsx_export 
+that saves multiple tables as a single XLSX spreadsheet, with the sheet names equal to the table names, 
+and the sheet headers in bold and with autofilter. 
+The table names are the arguments 2 to N of the xlsx_export function. If invoked with only one parameter then exports all the tables in the schema.
+Use the SQLite virtual table zipfile extension https://sqlite.org/zipfile.html to handle the ZIP container. Do not use external libraries to handle XML.
+Sanitize the sheet names to conform to Excel restrictions. Comply with 32K characters Excel cell limit. 
+Add SQL function xlsx_export_version returning "2026-01-07 Copilot Think Deeper (GPT 5.1?)".
+Worst-case expansion of plain text to XML is quote to '&quot;' (6 chars)
+Replace inlineStr usage with a sharedStrings table to reduce file size for repeated strings
+Use sqlite3_snprintf instead of snprintf in lines 389 and 432
+To insert a directory into the ZIP archive, set the "data" column to NULL when inserting into the zipfile virtual table
+Integrate these directory-insert calls into the C code
+Include as comments the prompts used.
+
+USAGE IN SQLITE:
+    .load xlsxexport
+    SELECT xlsx_export('output.xlsx');  -- Export all tables in the schema
+    SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
+    -- or with a single table:
+    SELECT xlsx_export('output.xlsx', 'mytable');
+    SELECT xlsx_export_version();
+*/
+
+/*
+xlsxexport_shared_dirs.c
+
+SQLite loadable extension implementing:
+  - xlsx_export(filename, table1, table2, ...)
+    Writes an XLSX file using the SQLite zipfile virtual table.
+    Uses a sharedStrings table to reduce file size.
+    Creates explicit directory entries in the ZIP by inserting rows with data == NULL.
+    Header row uses bold style (xf index 1) and an autofilter is applied.
+    Numeric types are written as numbers; text uses sharedStrings (t="s").
+    Text is truncated to Excel's ~32K character limit per cell.
+
+  - xlsx_export_version()
+    Returns "2026-01-07 Copilot Think Deeper (GPT 5.1?)".
+
+Notes:
+  - Assumes a zipfile virtual table module is available and supports:
+      CREATE VIRTUAL TABLE temp._xlsx_zip USING zipfile('archive.xlsx');
+      INSERT OR REPLACE INTO temp._xlsx_zip(name, data) VALUES(...);
+    If your zipfile vtab differs, adapt zipfile_insert_via_vtab accordingly.
+  - No external XML libraries are used.
+  - For very large datasets this builds each worksheet and sharedStrings in memory; adapt if streaming is required.
+*/
+
+/*
+Prompts used (included per user request):
+
 "Create the C code for a SQLite extension named xlsxexport that contains a SQL function named xlsx_export that saves multiple tables as a single XLSX spreadsheet, with the 
 sheet names equal to the table names, and the sheet headers in bold and with autofilter. Use the SQLite zipfile extension to handle the ZIP container. Do not use external libraries to handle XML.
 The table names are the arguments 2 to N of the xlsx_export function.
 Sanitize the sheet names to conform to Excel restrictions. Comply with 32K characters Excel cell limit. 
-Add SQL function xlsx_export_version returning "2025-12-30 Copilot Think Deeper (GPT 5.1?)".
+Add SQL function xlsx_export_version returning "2026-01-07 Copilot Think Deeper (GPT 5.1?)".
 Include as comments the prompts used."
-
-Prompt 2:
 "Use the SQLite virtual table zipfile extension"
-
-Follow-up:
 "worst-case expansion of plain text to XML is quote to '&quot;' (6 chars)"
 
-User request:
 "Replace inlineStr usage with a sharedStrings table to reduce file size for repeated strings"
 
-Follow-up user request:
 "use sqlite3_snprintf instead of snprintf in lines 389 and 432"
 
-Follow-up user request:
 "To insert a directory into the ZIP archive, set the "data" column to NULL when inserting into the zipfile virtual table"
 
-User request:
 "Integrate these directory-insert calls into the C code"
 */
 
@@ -41,13 +82,12 @@ SQLite loadable extension implementing:
     Text is truncated to Excel's ~32K character limit per cell.
 
   - xlsx_export_version()
-    Returns "2025-12-30 Copilot Think Deeper (GPT 5.1?)".
+    Returns "2026-01-07 Copilot Think Deeper (GPT 5.1?)".
 
 Notes:
-  - Assumes a zipfile virtual table module is available and supports:
-      CREATE VIRTUAL TABLE temp._xlsx_zip USING zipfile('archive.xlsx');
-      INSERT OR REPLACE INTO temp._xlsx_zip(name, data) VALUES(...);
-    If your zipfile vtab differs, adapt zipfile_insert_via_vtab accordingly.
+  - Requires the SQLite zipfile virtual table extension (https://sqlite.org/zipfile.html).
+    The code creates a temporary virtual table temp._xlsx_zip_vtab using zipfile(<archive>),
+    and inserts rows (name, data) into it. To create directory entries, data is bound as NULL.
   - No external XML libraries are used.
   - For very large datasets this builds each worksheet and sharedStrings in memory; adapt if streaming is required.
 */
@@ -343,8 +383,8 @@ static const char *docprops_core =
 " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
 "  <dc:creator>sqlite3 xlsxexport</dc:creator>"
 "  <cp:lastModifiedBy>sqlite3 xlsxexport</cp:lastModifiedBy>"
-"  <dcterms:created xsi:type=\"dcterms:W3CDTF\">2025-12-30T00:00:00Z</dcterms:created>"
-"  <dcterms:modified xsi:type=\"dcterms:W3CDTF\">2025-12-30T00:00:00Z</dcterms:modified>"
+"  <dcterms:created xsi:type=\"dcterms:W3CDTF\">2026-01-07T00:00:00Z</dcterms:created>"
+"  <dcterms:modified xsi:type=\"dcterms:W3CDTF\">2026-01-07T00:00:00Z</dcterms:modified>"
 "</cp:coreProperties>";
 
 static const char *docprops_app =
@@ -589,7 +629,6 @@ static int zipfile_insert_via_vtab(sqlite3 *db, const char *archive_filename, co
     char *zSql = NULL;
     const char *vtabName = "_xlsx_zip_vtab";
 
-    //fprintf(stderr, "zipfile_insert_via_vtab() %s %s %p %lld\n", archive_filename, path_in_zip, data, nData);
     zCreate = sqlite3_mprintf("CREATE VIRTUAL TABLE IF NOT EXISTS temp.%s USING zipfile(%Q);", vtabName, archive_filename);
     if(!zCreate) return SQLITE_NOMEM;
 
@@ -607,7 +646,6 @@ static int zipfile_insert_via_vtab(sqlite3 *db, const char *archive_filename, co
         return rc;
     }
 
-    //zSql = sqlite3_mprintf("INSERT OR REPLACE INTO temp.%s(name, data) VALUES(?, ?);", vtabName);
     zSql = sqlite3_mprintf("INSERT INTO temp.%s(name, data) VALUES(?, ?);", vtabName);
     if(!zSql){
         sqlite3_exec(db, "ROLLBACK TO xlsx_export_sp;", NULL, NULL, NULL);
@@ -670,9 +708,14 @@ static int zipfile_insert_via_vtab(sqlite3 *db, const char *archive_filename, co
 
 /* ---------- xlsx_export function (uses sharedStrings and creates directories) ---------- */
 
+/* Behavior:
+   - If called with only one argument (filename), export all user tables in sqlite_master (type='table' and name NOT LIKE 'sqlite_%').
+   - If called with filename + table names, export only those tables.
+*/
+
 static void xlsx_export_func(sqlite3_context *context, int argc, sqlite3_value **argv){
     sqlite3 *db = sqlite3_context_db_handle(context);
-    if(argc < 2){
+    if(argc < 1){
         sqlite3_result_error(context, "Usage: xlsx_export(filename, table1, table2, ...)", -1);
         return;
     }
@@ -682,17 +725,75 @@ static void xlsx_export_func(sqlite3_context *context, int argc, sqlite3_value *
         return;
     }
 
-    int sheet_count = argc - 1;
-    char **raw_table_names = (char**)malloc(sizeof(char*) * sheet_count);
-    if(!raw_table_names){ sqlite3_result_error_nomem(context); return; }
-    for(int i=0;i<sheet_count;i++){
-        const unsigned char *t = sqlite3_value_text(argv[i+1]);
-        raw_table_names[i] = t ? xstrdup((const char*)t) : xstrdup("");
+    char **raw_table_names = NULL;
+    int sheet_count = 0;
+
+    /* If only filename provided, export all user tables in the schema */
+    if(argc == 1){
+        sqlite3_stmt *pTbl = NULL;
+        const char *sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;";
+        int rc = sqlite3_prepare_v2(db, sql, -1, &pTbl, NULL);
+        if(rc != SQLITE_OK){
+            sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+            return;
+        }
+        while((rc = sqlite3_step(pTbl)) == SQLITE_ROW){
+            const unsigned char *tname = sqlite3_column_text(pTbl, 0);
+            char **tmp = (char**)realloc(raw_table_names, sizeof(char*) * (sheet_count + 1));
+            if(!tmp){
+                sqlite3_finalize(pTbl);
+                for(int i=0;i<sheet_count;i++) free(raw_table_names[i]);
+                free(raw_table_names);
+                sqlite3_result_error_nomem(context);
+                return;
+            }
+            raw_table_names = tmp;
+            raw_table_names[sheet_count] = tname ? xstrdup((const char*)tname) : xstrdup("");
+            if(!raw_table_names[sheet_count]){
+                sqlite3_finalize(pTbl);
+                for(int i=0;i<sheet_count;i++) free(raw_table_names[i]);
+                free(raw_table_names);
+                sqlite3_result_error_nomem(context);
+                return;
+            }
+            sheet_count++;
+        }
+        sqlite3_finalize(pTbl);
+        if(rc != SQLITE_DONE){
+            for(int i=0;i<sheet_count;i++) free(raw_table_names[i]);
+            free(raw_table_names);
+            sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+            return;
+        }
+        if(sheet_count == 0){
+            sqlite3_result_error(context, "No user tables found to export", -1);
+            return;
+        }
+    } else {
+        /* Use provided table names argv[1..argc-1] */
+        sheet_count = argc - 1;
+        raw_table_names = (char**)malloc(sizeof(char*) * sheet_count);
+        if(!raw_table_names){ sqlite3_result_error_nomem(context); return; }
+        for(int i=0;i<sheet_count;i++){
+            const unsigned char *t = sqlite3_value_text(argv[i+1]);
+            raw_table_names[i] = t ? xstrdup((const char*)t) : xstrdup("");
+            if(!raw_table_names[i]){
+                for(int j=0;j<i;j++) free(raw_table_names[j]);
+                free(raw_table_names);
+                sqlite3_result_error_nomem(context);
+                return;
+            }
+        }
     }
 
     /* Sanitize sheet names */
     char **sheet_names = (char**)malloc(sizeof(char*) * sheet_count);
-    if(!sheet_names){ for(int i=0;i<sheet_count;i++) free(raw_table_names[i]); free(raw_table_names); sqlite3_result_error_nomem(context); return; }
+    if(!sheet_names){
+        for(int i=0;i<sheet_count;i++) free(raw_table_names[i]);
+        free(raw_table_names);
+        sqlite3_result_error_nomem(context);
+        return;
+    }
     for(int i=0;i<sheet_count;i++){
         sheet_names[i] = sanitize_sheet_name(raw_table_names[i], i, sheet_names, i);
         if(!sheet_names[i]){
@@ -705,7 +806,7 @@ static void xlsx_export_func(sqlite3_context *context, int argc, sqlite3_value *
     }
 
     char *pzErrMsg = NULL;
-    int rc;
+    int rc = SQLITE_OK;
 
     /* Prepare sharedStrings structure */
     sst shared;
@@ -748,89 +849,75 @@ static void xlsx_export_func(sqlite3_context *context, int argc, sqlite3_value *
     rc = zipfile_insert_via_vtab(db, (const char*)filename, "_rels/.rels", rels_rels, (sqlite3_int64)strlen(rels_rels), &pzErrMsg);
     if(rc != SQLITE_OK) goto cleanup_error;
 
-    /* 3) docProps */
+    /* 3) docProps/core.xml and app.xml */
     rc = zipfile_insert_via_vtab(db, (const char*)filename, "docProps/core.xml", docprops_core, (sqlite3_int64)strlen(docprops_core), &pzErrMsg);
     if(rc != SQLITE_OK) goto cleanup_error;
     rc = zipfile_insert_via_vtab(db, (const char*)filename, "docProps/app.xml", docprops_app, (sqlite3_int64)strlen(docprops_app), &pzErrMsg);
     if(rc != SQLITE_OK) goto cleanup_error;
 
     /* 4) xl/styles.xml */
-    char *styles_xml = build_styles_xml();
-    if(!styles_xml){ rc = SQLITE_NOMEM; goto cleanup_error; }
-    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/styles.xml", styles_xml, (sqlite3_int64)strlen(styles_xml), &pzErrMsg);
-    free(styles_xml);
+    char *styles = build_styles_xml();
+    if(!styles){ rc = SQLITE_NOMEM; goto cleanup_error; }
+    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/styles.xml", styles, (sqlite3_int64)strlen(styles), &pzErrMsg);
+    free(styles);
     if(rc != SQLITE_OK) goto cleanup_error;
 
     /* 5) xl/sharedStrings.xml */
-    char *shared_xml = build_sharedstrings_xml(&shared);
-    if(!shared_xml){ rc = SQLITE_NOMEM; goto cleanup_error; }
-    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/sharedStrings.xml", shared_xml, (sqlite3_int64)strlen(shared_xml), &pzErrMsg);
-    free(shared_xml);
+    char *sharedxml = build_sharedstrings_xml(&shared);
+    if(!sharedxml){ rc = SQLITE_NOMEM; goto cleanup_error; }
+    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/sharedStrings.xml", sharedxml, (sqlite3_int64)strlen(sharedxml), &pzErrMsg);
+    free(sharedxml);
     if(rc != SQLITE_OK) goto cleanup_error;
 
-    /* 6) xl/worksheets/sheetN.xml for each sheet */
+    /* 6) xl/workbook.xml and xl/_rels/workbook.xml.rels */
+    char *workbook = build_workbook_xml(sheet_names, sheet_count);
+    if(!workbook){ rc = SQLITE_NOMEM; goto cleanup_error; }
+    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/workbook.xml", workbook, (sqlite3_int64)strlen(workbook), &pzErrMsg);
+    free(workbook);
+    if(rc != SQLITE_OK) goto cleanup_error;
+
+    char *wbrels = build_workbook_rels(sheet_count);
+    if(!wbrels){ rc = SQLITE_NOMEM; goto cleanup_error; }
+    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/_rels/workbook.xml.rels", wbrels, (sqlite3_int64)strlen(wbrels), &pzErrMsg);
+    free(wbrels);
+    if(rc != SQLITE_OK) goto cleanup_error;
+
+    /* 7) worksheets */
     for(int i=0;i<sheet_count;i++){
-        char path[180];
+        char path[256];
         sqlite3_snprintf(sizeof(path), path, "xl/worksheets/sheet%d.xml", i+1);
         rc = zipfile_insert_via_vtab(db, (const char*)filename, path, worksheets[i].data, (sqlite3_int64)worksheets[i].len, &pzErrMsg);
         if(rc != SQLITE_OK) goto cleanup_error;
     }
 
-    /* 7) xl/_rels/workbook.xml.rels */
-    char *workbook_rels = build_workbook_rels(sheet_count);
-    if(!workbook_rels){ rc = SQLITE_NOMEM; goto cleanup_error; }
-    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/_rels/workbook.xml.rels", workbook_rels, (sqlite3_int64)strlen(workbook_rels), &pzErrMsg);
-    free(workbook_rels);
-    if(rc != SQLITE_OK) goto cleanup_error;
-
-    /* 8) xl/workbook.xml */
-    char *workbook_xml = build_workbook_xml(sheet_names, sheet_count);
-    if(!workbook_xml){ rc = SQLITE_NOMEM; goto cleanup_error; }
-    rc = zipfile_insert_via_vtab(db, (const char*)filename, "xl/workbook.xml", workbook_xml, (sqlite3_int64)strlen(workbook_xml), &pzErrMsg);
-    free(workbook_xml);
-    if(rc != SQLITE_OK) goto cleanup_error;
-
-    /* success */
-    for(int i=0;i<sheet_count;i++){
-        mw_free(&worksheets[i]);
-        free(raw_table_names[i]);
-        free(sheet_names[i]);
-    }
-    free(worksheets);
-    free(raw_table_names);
-    free(sheet_names);
-    sst_free(&shared);
-    sqlite3_result_int(context, 0);
-    return;
+    /* success: return sheet_count */
+    sqlite3_result_int(context, sheet_count);
 
 cleanup_error:
-    if(pzErrMsg){
-        sqlite3_result_error(context, pzErrMsg, -1);
-        sqlite3_free(pzErrMsg);
-    } else {
-        sqlite3_result_error(context, sqlite3_errstr(rc), -1);
+    /* cleanup resources */
+    if(rc != SQLITE_OK){
+        if(pzErrMsg) sqlite3_result_error(context, pzErrMsg, -1);
+        else sqlite3_result_error(context, sqlite3_errmsg(db), -1);
     }
-    if(sheet_count){
-        for(int i=0;i<sheet_count;i++){
-            if(raw_table_names && raw_table_names[i]) free(raw_table_names[i]);
-            if(sheet_names && sheet_names[i]) free(sheet_names[i]);
-        }
-    }
-    if(raw_table_names) free(raw_table_names);
-    if(sheet_names) free(sheet_names);
-    if(sheet_count && worksheets){
+    if(worksheets){
         for(int i=0;i<sheet_count;i++) mw_free(&worksheets[i]);
         free(worksheets);
     }
     sst_free(&shared);
-    return;
+    for(int i=0;i<sheet_count;i++){
+        if(raw_table_names && raw_table_names[i]) free(raw_table_names[i]);
+        if(sheet_names && sheet_names[i]) free(sheet_names[i]);
+    }
+    free(raw_table_names);
+    free(sheet_names);
+    if(pzErrMsg) sqlite3_free(pzErrMsg);
 }
 
 /* ---------- xlsx_export_version ---------- */
 
 static void xlsx_export_version(sqlite3_context *context, int argc, sqlite3_value **argv){
     (void)argc; (void)argv;
-    sqlite3_result_text(context, "2025-12-30 Copilot Think Deeper (GPT 5.1?)", -1, SQLITE_STATIC);
+    sqlite3_result_text(context, "2026-01-07 Copilot Think Deeper (GPT 5.1?)", -1, SQLITE_STATIC);
 }
 
 /* ---------- Extension entry point ---------- */
@@ -840,7 +927,7 @@ __declspec(dllexport)
 #endif
 int sqlite3_xlsxexport_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi){
     SQLITE_EXTENSION_INIT2(pApi);
-    int rc;
+    int rc = SQLITE_OK;
     rc = sqlite3_create_function(db, "xlsx_export", -1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, xlsx_export_func, NULL, NULL);
     if(rc != SQLITE_OK){
         if(pzErrMsg) *pzErrMsg = sqlite3_mprintf("Failed to register xlsx_export: %s", sqlite3_errmsg(db));
