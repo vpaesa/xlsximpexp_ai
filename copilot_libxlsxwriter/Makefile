@@ -2,14 +2,14 @@
 
 # Compiler settings
 CC ?= gcc
-CFLAGS ?= -O2 -fPIC -Wall -Wextra -I../../sqlite-amalgamation-3510100
+CFLAGS ?= -O2 -fPIC -Wall -Wextra -I../../sqlite-amalgamation-3510200
 # Assuming libxlsxwriter headers are in system path or standard include path.
 # If not, add -I/path/to/libxlsxwriter/include
 
 # Cross-compiler for Windows 64-bit (MinGW-w64)
 CC_WIN64 ?= x86_64-w64-mingw32-gcc
 # Adjust include path for sqlite3 if necessary, matching copilot/Makefile logic
-CFLAGS_WIN64 ?= -O2 -Wall -Wextra -I../../sqlite-amalgamation-3510100
+CFLAGS_WIN64 ?= -O2 -Wall -Wextra -I../../sqlite-amalgamation-3510200
 
 ifeq ($(OS),Windows_NT)
     SHARED_EXT = .dll
