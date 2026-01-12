@@ -27,7 +27,7 @@ Regardless of the LLM used, the extensions have the same API and same name, so t
 | copilot  | xlsximport | Copilot Think Deeper | zipfile, expat | Yes |
 | gemini_libxlsxwriter  | xlsxexport | Gemini 3 Pro | libxlsxwriter | Yes |
 | gemini  | xlsxexport | Gemini 3 Pro | zipfile | LibreOffice unhappy, Gnumeric happy |
-| gemini  | xlsximport | Gemini 3 Pro | zipfile, expat | Yes |
+| gemini  | xlsximport | Gemini 3 Pro | zipfile, expat | No |
 | opus_libxlsxwriter | xlsxexport | Claude Opus 4.5 | libxlsxwriter | Yes |
 | opus  | xlsxexport | Claude Opus 4.5 | zipfile | Yes |
 | opus  | xlsximport | Claude Opus 4.5 | zipfile, expat | Yes |
@@ -74,4 +74,5 @@ The xlsxexport extension in the chatgpt_libopenxlsx folder depends on [OpenXLSX]
 
 ### LICENSE:
 My xlsximport and xlsxexport code is Public Domain. Same as [SQLite](https://www.sqlite.org/). Notice that [Expat](http://expat.sourceforge.net/) license is MIT, and [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter) license is FreeBSD. [OpenXLSX](https://github.com/troldal/OpenXLSX) license is MIT.
+
 
