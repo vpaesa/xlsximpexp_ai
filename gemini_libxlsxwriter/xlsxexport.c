@@ -4,8 +4,7 @@ Create the C code for a SQLite extension named xlsxexport using the
 libXLSXwriter library that contains a SQL function named xlsx_export 
 that saves multiple tables as a single XLSX spreadsheet, with the 
 sheet names equal to the table names, and the sheet headers in bold 
-and with autofilter. If invoked with only one parameter then exports 
-all the tables in the schema.
+and with autofilter. If invoked with only one parameter then exports all the tables in the schema
 xlsx_export returns the number of tables exported.
 Include as comments the commands to cross compile 
 on Linux statically the extension and libXLSXwriter. 
