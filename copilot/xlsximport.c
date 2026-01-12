@@ -13,8 +13,9 @@ Excel cell content length limit is 32767 characters.
 Create a SQL function named xlsx_import that creates one table for each of the sheets in the XLSX files, table name equal to sheet name, and column names equal to the values in first row of the sheet.
 The first parameter is the XLSX filename. Subsequent optional parameters are sheet names or sheet numbers (1-based) to import.
 Use expat for XML parsing. Add support for both shared and inline strings.  
-Do not perform table name and column sanititazion. Use proper quoting instead. 
-Add SQL function xlsx_import_version returning "2025-12-30 Copilot Think Deeper (GPT 5.1?)". 
+Do not perform table name and column sanitization. Use proper quoting instead.
+Add xlsx_import_sheetnames() table-valued function that returns the names of the sheets in the file.
+Add SQL function xlsx_import_version returning "2026-01-07 Copilot Think Deeper (GPT 5.1?)". 
 Add all user prompts as comments.
 
 Usage:
@@ -23,6 +24,7 @@ SELECT xlsx_import('filename.xlsx');  -- Import all sheets
 SELECT xlsx_import('filename.xlsx', 'Sheet1', 'Sheet2');  -- Import specific sheets by name
 SELECT xlsx_import('filename.xlsx', 1, 3);  -- Import sheets by number (1-based)
 SELECT xlsx_import('filename.xlsx', 'Sheet1', 2);  -- Mix of names and numbers
+SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('filename.xlsx');
 SELECT xlsx_import_version();
 */
 
@@ -42,10 +44,384 @@ Limitations and notes:
 #include <sqlite3ext.h>
 SQLITE_EXTENSION_INIT1
 
+typedef struct xlsx_vtab {
+    sqlite3_vtab base;
+    sqlite3 *db; /* sqlite connection pointer */
+} xlsx_vtab;
+
+typedef struct xlsx_cursor {
+    sqlite3_vtab_cursor base;
+    char **sheet_names;
+    int sheet_count;
+    int rowid;
+} xlsx_cursor;
+
+/* Parser context for Expat */
+typedef struct parser_ctx {
+    char **names;
+    int count;
+    int capacity;
+    char *error;
+} parser_ctx;
+
+/* Forward declarations */
+static int xlsxConnect(sqlite3 *db, void *pAux, int argc, const char *const *argv,
+                       sqlite3_vtab **ppVtab, char **pzErr);
+static int xlsxDisconnect(sqlite3_vtab *pVtab);
+static int xlsxOpen(sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCursor);
+static int xlsxClose(sqlite3_vtab_cursor*);
+static int xlsxFilter(sqlite3_vtab_cursor*, int idxNum, const char *idxStr,
+                      int argc, sqlite3_value **argv);
+static int xlsxNext(sqlite3_vtab_cursor*);
+static int xlsxEof(sqlite3_vtab_cursor*);
+static int xlsxColumn(sqlite3_vtab_cursor*, sqlite3_context*, int);
+static int xlsxRowid(sqlite3_vtab_cursor*, sqlite3_int64*);
+static int xlsxBestIndex(sqlite3_vtab *pVTab, sqlite3_index_info*);
+
+/* Module object */
+static sqlite3_module xlsxModule = {
+    .iVersion     = 0,
+    .xCreate      = 0,
+    .xConnect     = xlsxConnect,
+    .xBestIndex   = xlsxBestIndex,
+    .xDisconnect  = xlsxDisconnect,
+    .xDestroy     = 0,
+    .xOpen        = xlsxOpen,
+    .xClose       = xlsxClose,
+    .xFilter      = xlsxFilter,
+    .xNext        = xlsxNext,
+    .xEof         = xlsxEof,
+    .xColumn      = xlsxColumn,
+    .xRowid       = xlsxRowid,
+    .xUpdate      = 0,
+    .xBegin       = 0,
+    .xSync        = 0,
+    .xCommit      = 0,
+    .xRollback    = 0,
+    .xFindFunction= 0,
+    .xRename      = 0,
+    .xSavepoint   = 0,
+    .xRelease     = 0,
+    .xRollbackTo  = 0,
+    .xShadowName  = 0,
+    /* Newer fields (example) */
+    .xIntegrity   = 0,   /* explicitly initialize the newer field(s) */
+};
+
+/* Helper: free sheet names in cursor */
+static void free_sheet_names(xlsx_cursor *cur){
+    if(!cur) return;
+    if(cur->sheet_names){
+        for(int i=0;i<cur->sheet_count;i++){
+            free(cur->sheet_names[i]);
+        }
+        free(cur->sheet_names);
+        cur->sheet_names = NULL;
+    }
+    cur->sheet_count = 0;
+}
+
+/* Helper: append name to parser_ctx */
+static int parser_append_name(parser_ctx *ctx, const char *name){
+    if(!ctx || !name) return 0;
+    if(ctx->count + 1 > ctx->capacity){
+        int newcap = ctx->capacity ? ctx->capacity * 2 : 8;
+        char **tmp = (char**)realloc(ctx->names, newcap * sizeof(char*));
+        if(!tmp) return 0;
+        ctx->names = tmp;
+        ctx->capacity = newcap;
+    }
+    ctx->names[ctx->count] = strdup(name);
+    if(!ctx->names[ctx->count]) return 0;
+    ctx->count++;
+    return 1;
+}
+
+/* Utility: check if local name equals target (handles possible prefix "prefix:sheet") */
+static int local_name_equals(const char *qname, const char *target){
+    if(!qname || !target) return 0;
+    const char *colon = strrchr(qname, ':');
+    const char *local = colon ? colon + 1 : qname;
+    return strcmp(local, target) == 0;
+}
+
+/* Expat start element handler */
+static void XMLCALL start_element(void *userData, const XML_Char *name, const XML_Char **atts){
+    parser_ctx *ctx = (parser_ctx*)userData;
+    if(!ctx) return;
+
+    /* Look for element named "sheet" (namespace prefixes possible) */
+    if(local_name_equals((const char*)name, "sheet")){
+        /* find attribute "name" (may be prefixed) */
+        for(const XML_Char **a = atts; a && *a; a += 2){
+            const char *attr_name = (const char*)a[0];
+            const char *attr_val  = (const char*)a[1];
+            if(local_name_equals(attr_name, "name")){
+                if(!parser_append_name(ctx, attr_val)){
+                    /* memory error: record it */
+                    if(!ctx->error) ctx->error = strdup("Out of memory while collecting sheet names");
+                }
+                break;
+            }
+        }
+    }
+}
+
+/*
+ * parse_sheet_names_from_xlsx_via_zipfile_expat
+ * - db: sqlite3 connection (must have zipfile module available)
+ * - filename: path to XLSX file
+ * - out_names/out_count: outputs (caller must free names)
+ * - pzErr: sqlite3_mprintf'd error message on failure (caller must sqlite3_free)
+ */
+static int parse_sheet_names_from_xlsx_via_zipfile_expat(sqlite3 *db,
+                                                         const char *filename,
+                                                         char ***out_names,
+                                                         int *out_count,
+                                                         char **pzErr)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT data FROM zipfile(?) WHERE name = 'xl/workbook.xml' LIMIT 1";
+    int rc;
+    parser_ctx ctx;
+    XML_Parser parser = NULL;
+
+    *out_names = NULL;
+    *out_count = 0;
+    if(!db || !filename){
+        if(pzErr) *pzErr = sqlite3_mprintf("Invalid arguments");
+        return SQLITE_MISUSE;
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if(rc != SQLITE_OK){
+        if(pzErr) *pzErr = sqlite3_mprintf("Failed to prepare zipfile query: %s", sqlite3_errmsg(db));
+        return rc;
+    }
+
+    rc = sqlite3_bind_text(stmt, 1, filename, -1, SQLITE_STATIC);
+    if(rc != SQLITE_OK){
+        if(pzErr) *pzErr = sqlite3_mprintf("Failed to bind filename: %s", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return rc;
+    }
+
+    rc = sqlite3_step(stmt);
+    if(rc == SQLITE_ROW){
+        const void *blob = sqlite3_column_blob(stmt, 0);
+        int blob_size = sqlite3_column_bytes(stmt, 0);
+        if(!blob || blob_size <= 0){
+            if(pzErr) *pzErr = sqlite3_mprintf("workbook.xml is empty or unreadable");
+            sqlite3_finalize(stmt);
+            return SQLITE_ERROR;
+        }
+
+        /* Create Expat parser */
+        parser = XML_ParserCreate(NULL);
+        if(!parser){
+            if(pzErr) *pzErr = sqlite3_mprintf("Failed to create XML parser");
+            sqlite3_finalize(stmt);
+            return SQLITE_NOMEM;
+        }
+
+        XML_SetUserData(parser, &ctx);
+        XML_SetStartElementHandler(parser, start_element);
+
+        /* Parse in one call (workbook.xml is typically small) */
+        if(XML_Parse(parser, (const char*)blob, blob_size, XML_TRUE) == XML_STATUS_ERROR){
+            enum XML_Error err = XML_GetErrorCode(parser);
+            const char *msg = XML_ErrorString(err);
+            if(pzErr) *pzErr = sqlite3_mprintf("XML parse error: %s", msg ? msg : "unknown");
+            XML_ParserFree(parser);
+            sqlite3_finalize(stmt);
+            /* free any names collected */
+            for(int i=0;i<ctx.count;i++) free(ctx.names[i]);
+            free(ctx.names);
+            return SQLITE_ERROR;
+        }
+
+        if(ctx.error){
+            if(pzErr) *pzErr = sqlite3_mprintf("%s", ctx.error);
+            free(ctx.error);
+            XML_ParserFree(parser);
+            sqlite3_finalize(stmt);
+            for(int i=0;i<ctx.count;i++) free(ctx.names[i]);
+            free(ctx.names);
+            return SQLITE_NOMEM;
+        }
+
+        /* success */
+        *out_names = ctx.names;
+        *out_count = ctx.count;
+
+        XML_ParserFree(parser);
+    } else {
+        if(rc == SQLITE_DONE){
+            if(pzErr) *pzErr = sqlite3_mprintf("xl/workbook.xml not found in '%s' (zipfile returned no rows)", filename);
+            sqlite3_finalize(stmt);
+            return SQLITE_ERROR;
+        } else {
+            if(pzErr) *pzErr = sqlite3_mprintf("Error reading zipfile: %s", sqlite3_errmsg(db));
+            sqlite3_finalize(stmt);
+            return rc;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+}
+
+/* xConnect: declare the virtual table schema */
+static int xlsxConnect(sqlite3 *db, void *pAux, int argc, const char *const *argv,
+                       sqlite3_vtab **ppVtab, char **pzErr){
+    (void)pAux; (void)argc; (void)argv; /* silence unused-parameter warning */
+    int rc;
+    xlsx_vtab *vtab = (xlsx_vtab*)sqlite3_malloc(sizeof(xlsx_vtab));
+    if(!vtab) return SQLITE_NOMEM;
+    memset(vtab, 0, sizeof(xlsx_vtab));
+
+    vtab->db = db;
+
+    rc = sqlite3_declare_vtab(db, "CREATE TABLE xlsx_import_sheetnames(sheet_num INTEGER, sheet_name TEXT, filename HIDDEN)");
+    if(rc != SQLITE_OK){
+        sqlite3_free(vtab);
+        if(pzErr) *pzErr = sqlite3_mprintf("Failed to declare virtual table");
+        return rc;
+    }
+
+    *ppVtab = (sqlite3_vtab*)vtab;
+    return SQLITE_OK;
+}
+
+static int xlsxDisconnect(sqlite3_vtab *pVtab){
+    if(pVtab) sqlite3_free(pVtab);
+    return SQLITE_OK;
+}
+
+static int xlsxOpen(sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCursor){
+    (void)pVtab; /* silence unused-parameter warning */
+    xlsx_cursor *cur = (xlsx_cursor*)sqlite3_malloc(sizeof(xlsx_cursor));
+    if(!cur) return SQLITE_NOMEM;
+    memset(cur, 0, sizeof(xlsx_cursor));
+    *ppCursor = &cur->base;
+    return SQLITE_OK;
+}
+
+static int xlsxClose(sqlite3_vtab_cursor *pCursor){
+    xlsx_cursor *cur = (xlsx_cursor*)pCursor;
+    if(cur){
+        free_sheet_names(cur);
+        sqlite3_free(cur);
+    }
+    return SQLITE_OK;
+}
+
+/* xFilter: start scan; expect filename as first argument */
+static int xlsxFilter(sqlite3_vtab_cursor *pCursor, int idxNum, const char *idxStr,
+                      int argc, sqlite3_value **argv){
+    (void)idxNum; /* silence unused-parameter warning */
+    xlsx_cursor *cur = (xlsx_cursor*)pCursor;
+    const char *filename = NULL;
+    char *err = NULL;
+    int rc;
+
+    free_sheet_names(cur);
+    cur->rowid = 0;
+
+    if(argc >= 1 && argv && argv[0]){
+        if(sqlite3_value_type(argv[0]) != SQLITE_NULL){
+            filename = (const char*)sqlite3_value_text(argv[0]);
+        }
+    }
+
+    if(!filename && idxStr){
+        filename = idxStr;
+    }
+
+    if(!filename){
+        cur->sheet_count = 0;
+        return SQLITE_OK;
+    }
+
+    xlsx_vtab *vtab = (xlsx_vtab*)pCursor->pVtab;
+    if(!vtab || !vtab->db) return SQLITE_MISUSE;
+
+    rc = parse_sheet_names_from_xlsx_via_zipfile_expat(vtab->db, filename, &cur->sheet_names, &cur->sheet_count, &err);
+    if(rc != SQLITE_OK){
+        if(err){
+            sqlite3_log(SQLITE_ERROR, "%s", err);
+            sqlite3_free(err);
+        }
+        cur->sheet_count = 0;
+        return rc;
+    }
+
+    cur->rowid = 0;
+    return SQLITE_OK;
+}
+
+static int xlsxNext(sqlite3_vtab_cursor *pCursor){
+    xlsx_cursor *cur = (xlsx_cursor*)pCursor;
+    cur->rowid++;
+    return SQLITE_OK;
+}
+
+static int xlsxEof(sqlite3_vtab_cursor *pCursor){
+    xlsx_cursor *cur = (xlsx_cursor*)pCursor;
+    return cur->rowid >= cur->sheet_count;
+}
+
+static int xlsxColumn(sqlite3_vtab_cursor *pCursor, sqlite3_context *ctx, int col){
+    xlsx_cursor *cur = (xlsx_cursor*)pCursor;
+    if(col == 0){
+        sqlite3_result_int(ctx, cur->rowid + 1);
+    } else if(col == 1){
+        if(cur->rowid < cur->sheet_count && cur->sheet_names[cur->rowid]){
+            sqlite3_result_text(ctx, cur->sheet_names[cur->rowid], -1, SQLITE_TRANSIENT);
+        } else {
+            sqlite3_result_null(ctx);
+        }
+    } else {
+        sqlite3_result_null(ctx);
+    }
+    return SQLITE_OK;
+}
+
+static int xlsxRowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *pRowid){
+    xlsx_cursor *cur = (xlsx_cursor*)pCursor;
+    *pRowid = cur->rowid + 1;
+    return SQLITE_OK;
+}
+
+static int xlsxBestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo){
+    (void)pVTab;
+    int idx = -1;
+    /* Look for a constraint on the hidden column (index 2) */
+    for(int i=0; i<pIdxInfo->nConstraint; i++){
+        if(pIdxInfo->aConstraint[i].iColumn == 2){
+            if(pIdxInfo->aConstraint[i].op == SQLITE_INDEX_CONSTRAINT_EQ){
+                idx = i;
+                break;
+            }
+        }
+    }
+
+    if(idx >= 0){
+        pIdxInfo->aConstraintUsage[idx].argvIndex = 1;
+        pIdxInfo->aConstraintUsage[idx].omit = 1; 
+        pIdxInfo->estimatedCost = 10.0; /* Cheaper if we have the file */
+    } else {
+        pIdxInfo->estimatedCost = 1000000.0; /* Expensive check without filename */
+    }
+    return SQLITE_OK;
+}
+
 /* Version function */
 static void xlsx_import_version(sqlite3_context *context, int argc, sqlite3_value **argv){
     (void)argc; (void)argv;
-    sqlite3_result_text(context, "2025-12-30 Copilot Think Deeper (GPT 5.1?)", -1, SQLITE_STATIC);
+    sqlite3_result_text(context, "2026-01-07 Copilot Think Deeper (GPT 5.1?)", -1, SQLITE_STATIC);
 }
 
 /* Quote an identifier for use as a SQLite identifier.
@@ -762,8 +1138,20 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rout
     (void)pzErrMsg;
     int rc = SQLITE_OK;
     rc = sqlite3_create_function(db, "xlsx_import", -1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, xlsx_import_func, NULL, NULL);
-    if(rc != SQLITE_OK) return rc;
+    if(rc != SQLITE_OK){
+        if(pzErrMsg) *pzErrMsg = sqlite3_mprintf("Failed to register xlsx_import function");
+        return rc;
+    }
+    rc = sqlite3_create_module(db, "xlsx_import_sheetnames", &xlsxModule, 0);
+    if(rc != SQLITE_OK){
+        if(pzErrMsg) *pzErrMsg = sqlite3_mprintf("Failed to register xlsx_import_sheetnames module");
+        return rc;
+    }
     rc = sqlite3_create_function(db, "xlsx_import_version", 0, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, xlsx_import_version, NULL, NULL);
+    if(rc != SQLITE_OK){
+        if(pzErrMsg) *pzErrMsg = sqlite3_mprintf("Failed to register xlsx_import_version function");
+        return rc;
+    }
     return rc;
 }
 
