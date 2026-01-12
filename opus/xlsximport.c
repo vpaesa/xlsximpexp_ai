@@ -915,7 +915,7 @@ static void xlsx_import_version_func(sqlite3_context *ctx, int argc,
                                      sqlite3_value **argv) {
   (void)argc;
   (void)argv;
-  sqlite3_result_text(ctx, "2025-12-30 Claude Opus 4.5 (Thinking)", -1,
+  sqlite3_result_text(ctx, "2026-01-07 Claude Opus 4.5 (Thinking)", -1,
                       SQLITE_STATIC);
 }
 
@@ -1076,7 +1076,7 @@ static int sheetnamesFilter(sqlite3_vtab_cursor *cur, int idxNum,
     return SQLITE_ERROR;
   }
 
-  /* Read workbook.xml to get sheet names */
+  /* Read workbook.xml to get sheet names */xlsx_import_sheetnames()
   char *wb_data = NULL;
   int wb_len = 0;
   int rc =
@@ -1193,3 +1193,4 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg,
 
   return rc;
 }
+
