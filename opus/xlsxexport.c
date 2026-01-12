@@ -11,6 +11,7 @@ Use the zipfile extension to create this ZIP archive.
 Do not use any external library to write XML files.
 Warn if the Excel maximum cell size is exceeded.
 Sanitize the sheet names to conform to Excel restrictions.
+Add SQL function xlsx_export_version returning "2026-01-07 Claude Opus 4.5 (Thinking)".
 Include as comments the prompts used.
 
 USAGE IN SQLITE:
@@ -20,6 +21,7 @@ USAGE IN SQLITE:
     SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
     -- or with a single table:
     SELECT xlsx_export('output.xlsx', 'mytable');
+    SELECT xlsx_export_version();
 
 NOTES:
     - Requires the zipfile extension to be loaded first
@@ -264,7 +266,7 @@ static char *gen_workbook_rels(int sheet_count) {
 }
 
 /* Generate xl/workbook.xml */
-static char *gen_workbook(const char **sheet_names, int sheet_count) {
+static char *gen_workbook(const char **sheet_names, int sheet_count, char **ranges) {
     StrBuf sb;
     strbuf_init(&sb);
     
@@ -272,6 +274,9 @@ static char *gen_workbook(const char **sheet_names, int sheet_count) {
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
         "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+        "<fileVersion appName=\"xl\" lastEdited=\"4\" lowestEdited=\"4\" rupBuild=\"4505\"/>"
+        "<workbookPr defaultThemeVersion=\"124226\"/>"
+        "<bookViews><workbookView xWindow=\"240\" yWindow=\"15\" windowWidth=\"16095\" windowHeight=\"9660\"/></bookViews>"
         "<sheets>");
     
     int i;
@@ -283,8 +288,24 @@ static char *gen_workbook(const char **sheet_names, int sheet_count) {
         sqlite3_free(escaped_name);
         sqlite3_free(sanitized_name);
     }
-    
-    strbuf_append(&sb, "</sheets></workbook>");
+    strbuf_append(&sb, "</sheets>");
+
+    if (ranges) {
+        strbuf_append(&sb, "<definedNames>");
+        for (i = 0; i < sheet_count; i++) {
+            if (ranges[i]) {
+                char *sanitized_name = sanitize_sheet_name(sheet_names[i]);
+                char *escaped_name = xml_escape(sanitized_name ? sanitized_name : "Sheet");
+                strbuf_appendf(&sb, "<definedName name=\"_xlnm._FilterDatabase\" localSheetId=\"%d\" hidden=\"1\">%s!%s</definedName>",
+                    i, escaped_name, ranges[i]);
+                sqlite3_free(escaped_name);
+                sqlite3_free(sanitized_name);
+            }
+        }
+        strbuf_append(&sb, "</definedNames>");
+    }
+
+    strbuf_append(&sb, "<calcPr calcId=\"124519\" fullCalcOnLoad=\"1\"/></workbook>");
     return sb.str;
 }
 
@@ -309,7 +330,7 @@ static char *gen_styles(void) {
 
 /* Generate xl/worksheets/sheetN.xml for a table */
 static char *gen_worksheet(sqlite3 *db, const char *table_name, char **err_msg, 
-                           ExportWarnings *warnings) {
+                           ExportWarnings *warnings, char **pRange) {
     StrBuf sb;
     strbuf_init(&sb);
     sqlite3_stmt *stmt = NULL;
@@ -472,6 +493,9 @@ static char *gen_worksheet(sqlite3 *db, const char *table_name, char **err_msg,
         char last_col_letter[16];
         col_to_letter(col_count - 1, last_col_letter);
         strbuf_appendf(&sb, "<autoFilter ref=\"A1:%s%d\"/>", last_col_letter, last_row);
+        if (pRange) {
+            *pRange = sqlite3_mprintf("$A$1:$%s$%d", last_col_letter, last_row);
+        }
     }
     
     strbuf_append(&sb, "</worksheet>");
@@ -501,6 +525,7 @@ static void xlsx_export_func(
     const char **sheet_names = NULL;
     char **sheet_names_allocated = NULL;  /* For freeing dynamically allocated names */
     char **sheet_contents = NULL;
+    char **ranges = NULL;
     char *content_types = NULL;
     char *rels = NULL;
     char *workbook_rels = NULL;
@@ -618,9 +643,17 @@ static void xlsx_export_func(
     }
     memset(sheet_contents, 0, sizeof(char *) * sheet_count);
     
+    /* Allocate ranges array */
+    ranges = sqlite3_malloc(sizeof(char *) * sheet_count);
+    if (!ranges) {
+        sqlite3_result_error(context, "Out of memory", -1);
+        goto cleanup;
+    }
+    memset(ranges, 0, sizeof(char *) * sheet_count);
+    
     /* Generate all worksheet contents */
     for (i = 0; i < sheet_count; i++) {
-        sheet_contents[i] = gen_worksheet(db, sheet_names[i], &err_msg, &warnings);
+        sheet_contents[i] = gen_worksheet(db, sheet_names[i], &err_msg, &warnings, &ranges[i]);
         if (!sheet_contents[i]) {
             sqlite3_result_error(context, err_msg, -1);
             sqlite3_free(err_msg);
@@ -632,7 +665,7 @@ static void xlsx_export_func(
     content_types = gen_content_types(sheet_count);
     rels = gen_rels();
     workbook_rels = gen_workbook_rels(sheet_count);
-    workbook = gen_workbook(sheet_names, sheet_count);
+    workbook = gen_workbook(sheet_names, sheet_count, ranges);
     styles = gen_styles();
     
     if (!content_types || !rels || !workbook_rels || !workbook || !styles) {
@@ -713,18 +746,18 @@ static void xlsx_export_func(
         }
     }
     
-    /* Return the filename on success, with warning if cells were truncated */
+    /* Return the number of exported sheets on success, logging warning if cells were truncated */
     if (warnings.cells_truncated > 0) {
-        char *result = sqlite3_mprintf(
+        char *warning_msg = sqlite3_mprintf(
             "%s (WARNING: %d cell(s) exceeded Excel's %d character limit and were truncated. "
             "First occurrence: table '%s', row %d, column %d)",
             filename, warnings.cells_truncated, EXCEL_MAX_CELL_SIZE,
             warnings.first_truncated_table, warnings.first_truncated_row,
             warnings.first_truncated_col);
-        sqlite3_result_text(context, result, -1, sqlite3_free);
-    } else {
-        sqlite3_result_text(context, filename, -1, SQLITE_TRANSIENT);
+        sqlite3_log(SQLITE_WARNING, "%s", warning_msg);
+        sqlite3_free(warning_msg);
     }
+    sqlite3_result_int(context, sheet_count);
     
 cleanup:
     if (stmt) sqlite3_finalize(stmt);
@@ -745,6 +778,12 @@ cleanup:
     sqlite3_free(workbook_rels);
     sqlite3_free(workbook);
     sqlite3_free(styles);
+    if (ranges) {
+        for (i = 0; i < sheet_count; i++) {
+            sqlite3_free(ranges[i]);
+        }
+        sqlite3_free(ranges);
+    }
 }
 
 /*
@@ -759,7 +798,7 @@ static void xlsx_export_version(
 ) {
     (void)argc;
     (void)argv;
-    sqlite3_result_text(context, "2025-12-30 Claude Opus 4.5 (Thinking)", -1, SQLITE_STATIC);
+    sqlite3_result_text(context, "2026-01-07 Claude Opus 4.5 (Thinking)", -1, SQLITE_STATIC);
 }
 
 /*
