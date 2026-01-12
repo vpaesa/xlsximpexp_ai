@@ -5,23 +5,29 @@ Create the C code for a SQLite extension named xlsxexport using the
 libXLSXwriter library that contains a SQL function named xlsx_export 
 that saves multiple tables as a single XLSX spreadsheet, with the 
 sheet names equal to the table names, and the sheet headers in bold 
-and with autofilter. 
+and with autofilter.
 The table names are the arguments 2 to N of the xlsx_export function.
+xlsx_export() returns number of sheets written.
 Sanitize the sheet names to conform to Excel restrictions.
-Add SQL function xlsx_export_version returning "2025-12-30 Copilot Think Deeper (GPT 5.1?)".
+Add SQL function xlsx_export_version returning "2026-01-07 Copilot Think Deeper (GPT 5.1?)".
+Compile cleanly with: -std=c11 -Wall -Wextra -Wpedantic
+Include build example and usage in code
+Linking to sqlite library is not needed. Just include -I../../sqlite-amalgamation-3510200
 Include as comments the prompts used.
-
 */
 
 /*
 Build notes:
 - Requires libxlsxwriter and sqlite3 development headers/libraries.
 - Example compile (Linux):
-    gcc -fPIC -shared -o xlsxexport.so xlsxexport.c -lxlsxwriter -lsqlite3
-- Load into SQLite:
-    .load ./xlsxexport
-- Usage:
-    SELECT xlsx_export('out.xlsx', 'table1', 'table2', 'table3');
+    gcc -fPIC -shared -o xlsxexport.so -I../../sqlite-amalgamation-3510200 xlsxexport.c -lxlsxwriter
+
+USAGE IN SQLITE:
+    .load xlsxexport
+    SELECT xlsx_export('output.xlsx');  -- Export all tables in the schema
+    SELECT xlsx_export('output.xlsx', 'table1', 'table2', 'table3');
+    -- or with a single table:
+    SELECT xlsx_export('output.xlsx', 'mytable');
     SELECT xlsx_export_version();
 */
 
@@ -133,6 +139,7 @@ static char **list_all_tables(sqlite3 *db, int *out_count, char **err_msg) {
     int count = 0;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const unsigned char *name = sqlite3_column_text(stmt, 0);
+        // fprintf(stderr, "Found table: %s\n", name);
         if (name) {
             if (count >= capacity) {
                 capacity *= 2;
@@ -161,8 +168,8 @@ static char **list_all_tables(sqlite3 *db, int *out_count, char **err_msg) {
 static void xlsx_export_func(sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3 *db = sqlite3_context_db_handle(context);
 
-    if (argc < 2) {
-        sqlite3_result_error(context, "xlsx_export: requires at least filename and one table name", -1);
+    if (argc < 1) {
+        sqlite3_result_error(context, "xlsx_export: requires at least filename", -1);
         return;
     }
 
@@ -172,29 +179,51 @@ static void xlsx_export_func(sqlite3_context *context, int argc, sqlite3_value *
     }
     const char *filename = (const char*)sqlite3_value_text(argv[0]);
 
-    /* Collect table names from argv[1]..argv[argc-1] */
-    int table_count = argc - 1;
-    char **tables = malloc(sizeof(char*) * table_count);
-    if (!tables) {
-        sqlite3_result_error(context, "xlsx_export: memory allocation failed", -1);
-        return;
-    }
-    for (int i = 0; i < table_count; ++i) {
-        sqlite3_value *v = argv[i + 1];
-        if (!v || sqlite3_value_type(v) == SQLITE_NULL) {
-            /* free allocated names so far */
-            for (int j = 0; j < i; ++j) free(tables[j]);
-            free(tables);
-            sqlite3_result_error(context, "xlsx_export: table names (arguments 2..N) must not be NULL", -1);
+    char **tables = NULL;
+    int table_count = 0;
+
+    if (argc == 1) {
+        char *err_msg = NULL;
+        tables = list_all_tables(db, &table_count, &err_msg);
+        if (err_msg) {
+            sqlite3_result_error(context, err_msg, -1);
+            sqlite3_free(err_msg);
+            if (tables) { /* Should be NULL on error typically, but safety check */
+                for(int k=0; k<table_count; k++) free(tables[k]);
+                free(tables);
+            }
             return;
         }
-        const char *tname = (const char*)sqlite3_value_text(v);
-        tables[i] = strdup(tname ? tname : "");
-        if (!tables[i]) {
-            for (int j = 0; j < i; ++j) free(tables[j]);
-            free(tables);
+        if (table_count == 0) {
+            sqlite3_result_error(context, "xlsx_export: no user tables found to export", -1);
+            if (tables) free(tables);
+            return;
+        }
+    } else {
+        /* Collect table names from argv[1]..argv[argc-1] */
+        table_count = argc - 1;
+        tables = malloc(sizeof(char*) * table_count);
+        if (!tables) {
             sqlite3_result_error(context, "xlsx_export: memory allocation failed", -1);
             return;
+        }
+        for (int i = 0; i < table_count; ++i) {
+            sqlite3_value *v = argv[i + 1];
+            if (!v || sqlite3_value_type(v) == SQLITE_NULL) {
+                /* free allocated names so far */
+                for (int j = 0; j < i; ++j) free(tables[j]);
+                free(tables);
+                sqlite3_result_error(context, "xlsx_export: table names (arguments 2..N) must not be NULL", -1);
+                return;
+            }
+            const char *tname = (const char*)sqlite3_value_text(v);
+            tables[i] = strdup(tname ? tname : "");
+            if (!tables[i]) {
+                for (int j = 0; j < i; ++j) free(tables[j]);
+                free(tables);
+                sqlite3_result_error(context, "xlsx_export: memory allocation failed", -1);
+                return;
+            }
         }
     }
 
@@ -334,14 +363,14 @@ static void xlsx_export_func(sqlite3_context *context, int argc, sqlite3_value *
     free(tables);
     free(sheet_names);
 
-    /* Return success (0) */
-    sqlite3_result_int(context, 0);
+    /* Return success (count) */
+    sqlite3_result_int(context, table_count);
 }
 
 /* xlsx_export_version() -> TEXT */
 static void xlsx_export_version_func(sqlite3_context *context, int argc, sqlite3_value **argv) {
     (void)argc; (void)argv;
-    sqlite3_result_text(context, "2025-12-30 Copilot Think Deeper (GPT 5.1?)", -1, SQLITE_STATIC);
+    sqlite3_result_text(context, "2026-01-07 Copilot Think Deeper (GPT 5.1?)", -1, SQLITE_STATIC);
 }
 
 /* Extension entry point */
