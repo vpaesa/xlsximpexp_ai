@@ -73,8 +73,16 @@ Parsing XML is complicated so I rely on a reputable library: xlsximport depends 
 Writing XML is easier so the xlsxexport extension in the copilot, gemini, opus folders do not use external libraries. Do not worry aout reputability because the xlsxexport extension in folders copilot_libxlsxwriter and opus_libxlsxwriter depends on [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter).
 The xlsxexport extension in the chatgpt_libopenxlsx folder depends on [OpenXLSX](https://github.com/troldal/OpenXLSX). This library does not support autofilter.
 
+### SIMILAR SOFTWARE:
+[xlsxsqlite](https://github.com/vpaesa/xlsxsqlite/) by yours truly is a fork of [SQLite shell](https://www.sqlite.org/cli.html) that allows importing of XLSX files.
+x2bool's [xlite SQLite extension](https://github.com/x2bool/xlite) allows reading XLSX, XLS, ODS files, with range selection.
+David Jones [xlsxvtab SQLite extension](https://sourceforge.net/projects/vms-ports/files/SQLITE3/excel_convert_007.zip/download) allows reading XLSX files, with range selection.
+jakethaw's [xlsx_vtab SQLite extension](https://github.com/jakethaw/xlsx_vtab) allows reading XLSX files.
+
+
 ### LICENSE:
 My xlsximport and xlsxexport code is Public Domain. Same as [SQLite](https://www.sqlite.org/). Notice that [Expat](http://expat.sourceforge.net/) license is MIT, and [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter) license is FreeBSD. [OpenXLSX](https://github.com/troldal/OpenXLSX) license is MIT.
+
 
 
 
