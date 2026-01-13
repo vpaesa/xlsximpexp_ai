@@ -1,4 +1,4 @@
-# Makefile for gemini folder extensions (xlsximport)
+# Makefile for gemini_libxlsxwriter folder extensions
 
 # Compiler settings
 CC ?= gcc
@@ -23,37 +23,24 @@ else
 endif
 
 # Targets
-TARGET_IMPORT = xlsximport$(SHARED_EXT)
-TARGET_IMPORT_WIN64 = xlsximport.dll
-TARGET_EXPORT = xlsxexport$(SHARED_EXT)
-TARGET_EXPORT_WIN64 = xlsxexport.dll
+TARGET_EXPORT_XLSXWRITER = xlsxexport$(SHARED_EXT)
+TARGET_EXPORT_XLSXWRITER_WIN64 = xlsxexport.dll
 
-all: $(TARGET_IMPORT) $(TARGET_EXPORT)
+all: $(TARGET_EXPORT_XLSXWRITER)
 
-# Import
-$(TARGET_IMPORT): xlsximport.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< -lexpat
-	strip $@
-
-# Export 
-# Note: For Windows, -lz -lmsvcrt
-$(TARGET_EXPORT): xlsxexport.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBS) -lz
+# Export (Libxlsxwriter)
+$(TARGET_EXPORT_XLSXWRITER): xlsxexport.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< -lxlsxwriter
 	strip $@
 
 # Cross-compile
-win64: $(TARGET_IMPORT_WIN64) $(TARGET_EXPORT_WIN64)
+win64: $(TARGET_EXPORT_XLSXWRITER_WIN64)
 
-$(TARGET_IMPORT_WIN64): xlsximport.c
-	$(CC_WIN64) $(CFLAGS_WIN64) -shared -o $@ $< -lexpat
-	x86_64-w64-mingw32-strip $@
-
-$(TARGET_EXPORT_WIN64): xlsxexport.c
-	$(CC_WIN64) $(CFLAGS_WIN64) -shared -o $@ $< -lz -lmsvcrt
+$(TARGET_EXPORT_XLSXWRITER_WIN64): xlsxexport.c
+	$(CC_WIN64) $(CFLAGS_WIN64) -shared -o $@ $< -lxlsxwriter -lz -lmsvcrt
 	x86_64-w64-mingw32-strip $@
 
 clean:
-	rm -f $(TARGET_IMPORT) $(TARGET_IMPORT_WIN64) $(TARGET_EXPORT) $(TARGET_EXPORT_WIN64)
+	rm -f $(TARGET_EXPORT_XLSXWRITER) $(TARGET_EXPORT_XLSXWRITER_WIN64)
 
 .PHONY: all win64 clean
-
