@@ -1,6 +1,6 @@
 # Master Makefile
 
-SUBDIRS = opus gemini copilot opus_libxlsxwriter copilot_libxlsxwriter
+SUBDIRS = chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
 
 all:
 	@for dir in $(SUBDIRS); do \
@@ -19,3 +19,4 @@ clean:
 
 
 .PHONY: all win64 clean $(SUBDIRS)
+
