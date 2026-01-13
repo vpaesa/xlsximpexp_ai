@@ -80,12 +80,13 @@ I know of four SQLite extensions:
 * little-brother's [odbc](https://github.com/little-brother/sqlite-extensions/) allows reading and writing XLSX/XLS files, with range selection (or anything ODBC supports).
 * jakethaw's [xlsx_vtab](https://github.com/jakethaw/xlsx_vtab) allows reading XLSX files.
 
-And I know of two SQLite forks 
+And I know of two SQLite forks:
 * [xlsxsqlite](https://github.com/vpaesa/xlsxsqlite/) by yours truly is a humble fork of [SQLite shell](https://www.sqlite.org/cli.html) that allows importing XLSX files.
-* [SpatiaLite](https://www.gaia-gis.it/gaia-sins/spatialite-sql-5.1.0.html) is a GIS oriented fork of SQLite that allows importing XLX, XLSX, ODS files.
+* [SpatiaLite](https://www.gaia-gis.it/gaia-sins/spatialite-sql-5.1.0.html) is a GIS oriented fork of SQLite that allows importing XLS, XLSX, ODS files.
 
 ### LICENSE:
 My xlsximport and xlsxexport code is Public Domain. Same as [SQLite](https://www.sqlite.org/). Notice that [Expat](http://expat.sourceforge.net/) license is MIT, and [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter) license is FreeBSD. [OpenXLSX](https://github.com/troldal/OpenXLSX) license is MIT.
+
 
 
 
