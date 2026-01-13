@@ -1,4 +1,4 @@
-# Makefile for copilot folder extensions (xlsximport)
+# Makefile for gemini folder extensions (xlsximport)
 
 # Compiler settings
 CC ?= gcc
@@ -56,3 +56,4 @@ clean:
 	rm -f $(TARGET_IMPORT) $(TARGET_IMPORT_WIN64) $(TARGET_EXPORT) $(TARGET_EXPORT_WIN64)
 
 .PHONY: all win64 clean
+
