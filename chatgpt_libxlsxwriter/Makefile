@@ -1,4 +1,4 @@
-# Makefile for copilot_libxlsxwriter (xlsxexport with libxlsxwriter)
+# Makefile for chatgpt_libxlsxwriter (xlsxexport with libxlsxwriter)
 
 # Compiler settings
 CC ?= gcc
@@ -47,3 +47,4 @@ clean:
 	rm -f $(TARGET_EXPORT) $(TARGET_EXPORT_WIN64)
 
 .PHONY: all win64 clean
+
