@@ -1076,7 +1076,7 @@ static int sheetnamesFilter(sqlite3_vtab_cursor *cur, int idxNum,
     return SQLITE_ERROR;
   }
 
-  /* Read workbook.xml to get sheet names */xlsx_import_sheetnames()
+  /* Read workbook.xml to get sheet names */
   char *wb_data = NULL;
   int wb_len = 0;
   int rc =
@@ -1193,4 +1193,5 @@ int sqlite3_xlsximport_init(sqlite3 *db, char **pzErrMsg,
 
   return rc;
 }
+
 
