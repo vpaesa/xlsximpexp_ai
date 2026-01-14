@@ -1,74 +1,89 @@
 #!/bin/bash
 
-# This script depends on ssconvert (part of Gnumeric). You must install Gnumeric by yourself.
+# This script depends on ssconvert (part of Gnumeric) and wine. You must install Gnumeric and wine by yourself.
+
 # Also depends on SQLite Linux shell (sqlite3). That is downloaded and unpacked by next two lines.
 #curl -C - --remote-name  https://sqlite.org/2026/sqlite-tools-linux-x64-3510200.zip
 #unzip -u sqlite-tools-linux-x64-3510200.zip sqlite3
 
-echo -e "+++++++++++++++++++++++++++++++\nMinimal Testing of xlsximport and xlsxexport"
-for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
-do
-  echo -e "-------------------------------\nLLM: ${llm}"
-  ./sqlite3 ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport.so" "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" \
-  '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');" 'SELECT xlsx_import_version();' \
-  "SELECT * FROM sqlite_master WHERE type='table';" ".load ../${llm}/xlsxexport.so" "SELECT xlsx_export('validating_09_severalsheets_t_06.xlsx');" \
-  'SELECT xlsx_export_version();'
-done
+# Also depends on SQLite Windows 64-bit shell (sqlite3.exe). That is downloaded and unpacked by next two lines.
+#curl -C - --remote-name  https://sqlite.org/2026/sqlite-tools-win-x64-3510200.zip
+#unzip -u sqlite-tools-win-x64-3510200.zip sqlite3.exe
 
-echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsximport"
-for llm in opus gemini copilot chatgpt
+# Also depends on DLLs
+#cp -p /usr/x86_64-w64-mingw32/lib/zlib1.dll .
+#cp -p /usr/x86_64-w64-mingw32/bin/libexpat-1.dll .
+
+for SQLITE in 'wine ./sqlite3.exe' ./sqlite3
 do
-  echo -e "-------------------------------\nLLM: ${llm}"
-  for i in ??_*_??.xlsx
+  echo "=============================== Using $SQLITE ==============================="
+  $SQLITE ':memory:' '.ver'
+  echo "============================================================================="
+  echo -e "+++++++++++++++++++++++++++++++\nMinimal Testing of xlsximport and xlsxexport"
+  for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
   do
-    testcase=${i%.xlsx}
-    sheets=${i: -7:2}
-    echo "Testcase ${i} has ${sheets} sheets"
-    ssconvert --import-type=Gnumeric_Excel:xlsx --export-type=Gnumeric_stf:stf_csv --export-file-per-sheet $i expected_${testcase}.csv
-    for expected_sheet in expected_${testcase}.csv.*
-    do
-      echo "Testing ${i} sheet ${sheetid}"
-      importing_sheet="importing_${expected_sheet#expected_}"
-      sheetid=$(printf "%02d" "${expected_sheet##*.}")
-      # '.trace'  
-      ./sqlite3 ':memory:' '.mode csv' '.headers on' ".import ${expected_sheet} ThisIsWhatIExpect" ".once ${expected_sheet}" "SELECT * from ThisIsWhatIExpect;" ".load ../${llm}/xlsximport.so" "SELECT xlsx_import('$i');" ".once ${importing_sheet}" "SELECT * from \"${sheetid}\";" 
-      cmp $expected_sheet $importing_sheet
-      if [ $? -eq 0 ]
-      then echo "Passed ${testcase} sheet ${sheetid}"
-      else echo "Failed ${testcase} sheet ${sheetid}"
-      fi
-      echo
-    done  
+    echo -e "-------------------------------\nLLM: ${llm}"
+    $SQLITE ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport" "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" \
+    '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');" 'SELECT xlsx_import_version();' \
+    "SELECT * FROM sqlite_master WHERE type='table';" ".load ../${llm}/xlsxexport" "SELECT xlsx_export('validating_09_severalsheets_t_06.xlsx');" \
+    'SELECT xlsx_export_version();'
   done
-done
 
-echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsxexport"
-for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
-do
-  echo -e "-------------------------------\nLLM: ${llm}"
-  #for i in ??_*_??.xlsx
-  for i in 00_headertworows_01.xlsx 14_headermillionrows_01.xlsx
+  echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsximport"
+  for llm in opus gemini copilot chatgpt
   do
-    testcase=${i%.xlsx}
-    sheets=${i: -7:2}
-    echo "Testcase ${i} has ${sheets} sheets"
-    #ssconvert --import-type=Gnumeric_Excel:xlsx --export-type=Gnumeric_stf:stf_csv --export-file-per-sheet $i expected_${testcase}.csv
-    for expected_sheet in expected_${testcase}.csv.*
+    echo -e "-------------------------------\nLLM: ${llm}"
+    for i in ??_*_??.xlsx
     do
-      echo "Testing ${i} sheet ${sheetid}"
-      exporting_sheet="exporting_${expected_sheet#expected_}"
-      sheetid=$(printf "%02d" "${expected_sheet##*.}")
-      # '.trace'  
-      ./sqlite3 ':memory:' '.mode csv' '.headers on' ".import ${expected_sheet} \"${sheetid}\"" ".load ../${llm}/xlsxexport.so" "SELECT xlsx_export('exporting_$i', '${sheetid}');"
-      ssconvert --import-type=Gnumeric_Excel:xlsx --export-type=Gnumeric_stf:stf_csv exporting_$i $exporting_sheet
-      ./sqlite3 ':memory:' '.mode csv' '.headers on' ".import ${exporting_sheet} ThisIsWhatIExport" ".once ${exporting_sheet}" "SELECT * from ThisIsWhatIExport;"
-      cmp $expected_sheet $exporting_sheet
-      if [ $? -eq 0 ]
-      then echo "Passed ${testcase} sheet ${sheetid}"
-      else echo "Failed ${testcase} sheet ${sheetid}"
-      fi
-      echo
-    done  
+      testcase=${i%.xlsx}
+      sheets=${i: -7:2}
+      echo "Testcase ${i} has ${sheets} sheets"
+      ssconvert --import-type=Gnumeric_Excel:xlsx --export-type=Gnumeric_stf:stf_csv --export-file-per-sheet $i expected_${testcase}.csv
+      for expected_sheet in expected_${testcase}.csv.*
+      do
+        echo "Testing ${i} sheet ${sheetid}"
+        importing_sheet="importing_${expected_sheet#expected_}"
+        sheetid=$(printf "%02d" "${expected_sheet##*.}")
+        # '.trace'  
+        $SQLITE ':memory:' '.mode csv' '.headers on' ".import ${expected_sheet} ThisIsWhatIExpect" ".once ${expected_sheet}" "SELECT * from ThisIsWhatIExpect;" ".load ../${llm}/xlsximport" "SELECT xlsx_import('$i');" ".once ${importing_sheet}" "SELECT * from \"${sheetid}\";" 
+        cmp $expected_sheet $importing_sheet
+        if [ $? -eq 0 ]
+        then echo "Passed ${testcase} sheet ${sheetid}"
+        else echo "Failed ${testcase} sheet ${sheetid}"
+        fi
+        echo
+      done  
+    done
+  done
+
+  echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsxexport"
+  for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
+  do
+    echo -e "-------------------------------\nLLM: ${llm}"
+    #for i in ??_*_??.xlsx
+    for i in 00_headertworows_01.xlsx 14_headermillionrows_01.xlsx
+    do
+      testcase=${i%.xlsx}
+      sheets=${i: -7:2}
+      echo "Testcase ${i} has ${sheets} sheets"
+      #ssconvert --import-type=Gnumeric_Excel:xlsx --export-type=Gnumeric_stf:stf_csv --export-file-per-sheet $i expected_${testcase}.csv
+      for expected_sheet in expected_${testcase}.csv.*
+      do
+        echo "Testing ${i} sheet ${sheetid}"
+        exporting_sheet="exporting_${expected_sheet#expected_}"
+        sheetid=$(printf "%02d" "${expected_sheet##*.}")
+        # '.trace'  
+        $SQLITE ':memory:' '.mode csv' '.headers on' ".import ${expected_sheet} \"${sheetid}\"" ".load ../${llm}/xlsxexport" "SELECT xlsx_export('exporting_$i', '${sheetid}');"
+        ssconvert --import-type=Gnumeric_Excel:xlsx --export-type=Gnumeric_stf:stf_csv exporting_$i $exporting_sheet
+        $SQLITE ':memory:' '.mode csv' '.headers on' ".import ${exporting_sheet} ThisIsWhatIExport" ".once ${exporting_sheet}" "SELECT * from ThisIsWhatIExport;"
+        cmp $expected_sheet $exporting_sheet
+        if [ $? -eq 0 ]
+        then echo "Passed ${testcase} sheet ${sheetid}"
+        else echo "Failed ${testcase} sheet ${sheetid}"
+        fi
+        echo
+      done  
+    done
   done
 done
 exit
@@ -78,12 +93,12 @@ ls -l ../attic/WDIEXCEL_Libreoffice.xlsx
 for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
 do
   echo -e "-------------------------------\nLLM: ${llm}"
-  ./sqlite3 ':memory:' ".load ../${llm%_libxlsxwriter}/xlsximport.so" '.output counts.sql' \
+  $SQLITE ':memory:' ".load ../${llm%_libxlsxwriter}/xlsximport" '.output counts.sql' \
   "SELECT 'select ' || quote(sheet_name) || ' as sheet_name, count(*) from \"' || sheet_name || '\" union all ' FROM xlsx_import_sheetnames('../attic/WDIEXCEL_Libreoffice.xlsx');" \
   ".print \"select '', '';\""
-  time ./sqlite3 ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport.so" "SELECT xlsx_import('../attic/WDIEXCEL_Libreoffice.xlsx');" \
+  time $SQLITE ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport" "SELECT xlsx_import('../attic/WDIEXCEL_Libreoffice.xlsx');" \
   '.read counts.sql' 'SELECT xlsx_import_version();' '.schema' \
-  ".load ../${llm}/xlsxexport.so" "SELECT xlsx_export('validating_WDIEXCEL_Libreoffice_${llm}.xlsx');" 'SELECT xlsx_export_version();'
+  ".load ../${llm}/xlsxexport" "SELECT xlsx_export('validating_WDIEXCEL_Libreoffice_${llm}.xlsx');" 'SELECT xlsx_export_version();'
 done
 ls -l validating_WDIEXCEL_Libreoffice_*.xlsx
 
@@ -97,11 +112,11 @@ soffice --headless --convert-to "xlsx:Calc Office Open XML" WDIEXCEL_other.xlsx
 soffice --headless --convert-to "xlsx:Calc Office Open XML" WDIEXCEL_other.xlsx
 
 # Minimal test of xlsx_import, xlsx_import_sheetnames, xlsx_import_version
-./sqlite3 ':memory:' '.mode box' '.load ../copilot/xlsximport.so' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');"
-./sqlite3 ':memory:' '.mode box' '.load ../copilot/xlsximport.so' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');"
+./sqlite3 ':memory:' '.mode box' '.load ../copilot/xlsximport' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');"
+./sqlite3 ':memory:' '.mode box' '.load ../copilot/xlsximport' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');"
 
 # Minimal test of xlsx_import, xlsx_import_sheetnames, xlsx_import_version, xlsx_export, xlsx_export_version
-./sqlite3 ':memory:' '.mode box' '.load ../gemini/xlsximport.so' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');" 'SELECT xlsx_import_version();' "SELECT * FROM sqlite_master WHERE type='table';" '.load ../gemini/xlsxexport.so' "SELECT xlsx_export('validating_09_severalsheets_t_06.xlsx');" 'SELECT xlsx_export_version();'
+./sqlite3 ':memory:' '.mode box' '.load ../gemini/xlsximport' "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" '.schema' 'select * from "00";' "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('09_severalsheets_t_06.xlsx');" 'SELECT xlsx_import_version();' "SELECT * FROM sqlite_master WHERE type='table';" '.load ../gemini/xlsxexport' "SELECT xlsx_export('validating_09_severalsheets_t_06.xlsx');" 'SELECT xlsx_export_version();'
 
 # An 80MB spreadsheet, but full of non-compliances: it needs to be read by Libreoffice and saved again, then it becomes 117MB.
 https://datacatalogfiles.worldbank.org/ddh-published/0037712/DR0095336/WDI_EXCEL_2025_12_19.zip
@@ -110,9 +125,9 @@ https://datacatalogfiles.worldbank.org/ddh-published/0037712/DR0095336/WDI_EXCEL
 for llm in opus gemini copilot chatgpt opus_libxlsxwriter gemini_libxlsxwriter copilot_libxlsxwriter chatgpt_libxlsxwriter
 do
   echo -e "-------------------------------\nLLM: ${llm}"
-  ./sqlite3 ':memory:' '.mode box' '.timer on' ".load ../${llm%_libxlsxwriter}/xlsximport.so" "SELECT xlsx_import('../attic/WDIEXCEL_Libreoffice.xlsx');" \
+  ./sqlite3 ':memory:' '.mode box' '.timer on' ".load ../${llm%_libxlsxwriter}/xlsximport" "SELECT xlsx_import('../attic/WDIEXCEL_Libreoffice.xlsx');" \
   "SELECT sheet_num, sheet_name FROM xlsx_import_sheetnames('../attic/WDIEXCEL_Libreoffice.xlsx');" 'SELECT xlsx_import_version();' \
-  ".load ../${llm}/xlsxexport.so" "SELECT xlsx_export('validating_WDIEXCEL_Libreoffice_${llm}.xlsx');" 'SELECT xlsx_export_version();'
+  ".load ../${llm}/xlsxexport" "SELECT xlsx_export('validating_WDIEXCEL_Libreoffice_${llm}.xlsx');" 'SELECT xlsx_export_version();'
 done
 
 SELECT xlsx_import('WDIEXCEL.xlsx');
