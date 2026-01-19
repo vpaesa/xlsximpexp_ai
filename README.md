@@ -69,7 +69,7 @@ SELECT xlsx_export_version();
 
 ### DEPENDENCIES:
 The [SQLite Zipfile Module](https://sqlite.org/zipfile.html) is used to read and write the ZIP files.
-Parsing XML is complicated so all variants rely on a reputable library: xlsximport depends on [Expat](http://expat.sourceforge.net/).
+Parsing XML is complicated so all xlsximport variants rely on a reputable library: [Expat](http://expat.sourceforge.net/).
 Writing XML is easier so the xlsxexport extension in the chatgpt, copilot, gemini, opus folders do not use external libraries. Do not worry about reputability because the xlsxexport extension in folders chatgpt_libxlsxwriter, copilot_libxlsxwriter and opus_libxlsxwriter depends on [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter).
 The xlsxexport extension in the chatgpt_libopenxlsx folder depends on [OpenXLSX](https://github.com/troldal/OpenXLSX). This library does not support autofilter.
 
@@ -86,6 +86,7 @@ And I know of two SQLite forks:
 
 ### LICENSE:
 My xlsximport and xlsxexport code is Public Domain. Same as [SQLite](https://www.sqlite.org/). Notice that [Expat](http://expat.sourceforge.net/) license is MIT, and [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter) license is FreeBSD. [OpenXLSX](https://github.com/troldal/OpenXLSX) license is MIT.
+
 
 
 
