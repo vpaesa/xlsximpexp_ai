@@ -754,6 +754,82 @@ static int read_zip_entry(sqlite3 *db, const char *xlsx_path,
 }
 
 /*
+** Compare two strings case-insensitively (ASCII). SQLite identifiers compare
+** case-insensitively, so column names must be made unique under this rule.
+*/
+static int ci_equal(const char *a, const char *b) {
+  while (*a && *b) {
+    if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+      return 0;
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
+
+/*
+** Build the column names for the table from the worksheet's first row. Blank
+** header cells become "colN". A name that collides with an earlier column
+** (case-insensitively) gets a numeric suffix so that CREATE TABLE does not
+** fail on duplicate headers. Returns an array of ws->max_col strings (each
+** allocated with sqlite3_malloc), or NULL on out-of-memory.
+*/
+static char **build_column_names(Worksheet *ws) {
+  Row *first_row = &ws->rows[0];
+  char **names = sqlite3_malloc(ws->max_col * sizeof(char *));
+  if (!names)
+    return NULL;
+  memset(names, 0, ws->max_col * sizeof(char *));
+
+  for (int col = 0; col < ws->max_col; col++) {
+    const char *raw = NULL;
+    if (col < first_row->count && first_row->cells[col].value)
+      raw = first_row->cells[col].value;
+
+    char *candidate = (raw && *raw) ? sqlite3_mprintf("%s", raw)
+                                    : sqlite3_mprintf("col%d", col + 1);
+    if (!candidate)
+      goto oom;
+
+    /* Resolve collisions with already-chosen column names. */
+    int suffix = 2;
+    int collides = 1;
+    while (collides) {
+      collides = 0;
+      for (int k = 0; k < col; k++) {
+        if (ci_equal(names[k], candidate)) {
+          collides = 1;
+          break;
+        }
+      }
+      if (collides) {
+        /* "%z" frees the previous candidate before formatting. */
+        char *next = sqlite3_mprintf("%z_%d", candidate, suffix++);
+        if (!next)
+          goto oom;
+        candidate = next;
+      }
+    }
+    names[col] = candidate;
+  }
+  return names;
+
+oom:
+  for (int k = 0; k < ws->max_col; k++)
+    sqlite3_free(names[k]);
+  sqlite3_free(names);
+  return NULL;
+}
+
+static void free_column_names(char **names, int count) {
+  if (!names)
+    return;
+  for (int i = 0; i < count; i++)
+    sqlite3_free(names[i]);
+  sqlite3_free(names);
+}
+
+/*
 ** Create a table from a worksheet.
 */
 static int create_table_from_worksheet(sqlite3 *db, const char *table_name,
@@ -763,43 +839,61 @@ static int create_table_from_worksheet(sqlite3 *db, const char *table_name,
     return SQLITE_OK;
   }
 
-  /* Build column names from first row */
-  Row *first_row = &ws->rows[0];
-
-  /* Start building CREATE TABLE statement */
-  sqlite3_str *sql = sqlite3_str_new(db);
+  /* Compute unique column names from the first row. */
+  char **col_names = build_column_names(ws);
+  if (!col_names) {
+    return SQLITE_NOMEM;
+  }
 
   char *escaped_table = escape_identifier(table_name);
-  sqlite3_str_appendf(sql, "CREATE TABLE IF NOT EXISTS %s (", escaped_table);
+  if (!escaped_table) {
+    free_column_names(col_names, ws->max_col);
+    return SQLITE_NOMEM;
+  }
+
+  /* Drop any existing table of the same name first, so that re-importing a
+  ** file replaces its data instead of silently appending duplicate rows. */
+  char *drop_sql = sqlite3_mprintf("DROP TABLE IF EXISTS %s", escaped_table);
+  if (!drop_sql) {
+    free(escaped_table);
+    free_column_names(col_names, ws->max_col);
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_exec(db, drop_sql, NULL, NULL, pzErrMsg);
+  sqlite3_free(drop_sql);
+  if (rc != SQLITE_OK) {
+    free(escaped_table);
+    free_column_names(col_names, ws->max_col);
+    return rc;
+  }
+
+  /* Build CREATE TABLE statement. */
+  sqlite3_str *sql = sqlite3_str_new(db);
+  sqlite3_str_appendf(sql, "CREATE TABLE %s (", escaped_table);
   free(escaped_table);
 
   for (int col = 0; col < ws->max_col; col++) {
     if (col > 0)
       sqlite3_str_appendall(sql, ", ");
 
-    const char *col_name = NULL;
-    if (col < first_row->count && first_row->cells[col].value) {
-      col_name = first_row->cells[col].value;
-    }
-
-    if (col_name && *col_name) {
-      char *escaped_col = escape_identifier(col_name);
+    char *escaped_col = escape_identifier(col_names[col]);
+    if (escaped_col) {
       sqlite3_str_appendall(sql, escaped_col);
       free(escaped_col);
     } else {
-      /* Generate default column name */
       sqlite3_str_appendf(sql, "\"col%d\"", col + 1);
     }
   }
 
   sqlite3_str_appendall(sql, ")");
+  free_column_names(col_names, ws->max_col);
 
   char *create_sql = sqlite3_str_finish(sql);
   if (!create_sql) {
     return SQLITE_NOMEM;
   }
 
-  int rc = sqlite3_exec(db, create_sql, NULL, NULL, pzErrMsg);
+  rc = sqlite3_exec(db, create_sql, NULL, NULL, pzErrMsg);
   sqlite3_free(create_sql);
 
   if (rc != SQLITE_OK) {
