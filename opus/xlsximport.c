@@ -157,11 +157,15 @@ static void XMLCALL ss_start_element(void *userData, const XML_Char *name,
   SharedStrings *ss = (SharedStrings *)userData;
   (void)atts;
 
-  if (strcmp(name, "t") == 0) {
-    ss->in_t = 1;
+  if (strcmp(name, "si") == 0) {
+    /* Start of a new string item - reset the accumulator. We do NOT reset on
+    ** <t> so that rich-text runs (<si><r><t>..</t></r><r><t>..</t></r></si>)
+    ** concatenate into a single value instead of keeping only the last run. */
     ss->current_len = 0;
     if (ss->current)
       ss->current[0] = '\0';
+  } else if (strcmp(name, "t") == 0) {
+    ss->in_t = 1;
   }
 }
 
