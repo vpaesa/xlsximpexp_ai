@@ -645,7 +645,6 @@ static void xlsx_export_func(
     char *workbook = NULL;
     char *styles = NULL;
     sqlite3_stmt *stmt = NULL;
-    char *sql = NULL;
     int rc;
     ExportWarnings warnings = {0, 0, 0, NULL};
     int names_need_free = 0;  /* Flag to indicate if we need to free sheet_names_allocated */
@@ -818,17 +817,11 @@ static void xlsx_export_func(
         goto cleanup;
     }
 
-    /* Delete existing file first using writefile if it exists */
-    sql = sqlite3_mprintf("SELECT writefile(%Q, zeroblob(0))", filename);
-    sqlite3_exec(db, sql, NULL, NULL, NULL);
-    sqlite3_free(sql);
-    
-    /* Now we need to use zipfile() to create the archive */
-    /* First, delete the file if it exists */
-    sql = sqlite3_mprintf("SELECT writefile(%Q, NULL)", filename);
-    sqlite3_exec(db, sql, NULL, NULL, NULL);
-    sqlite3_free(sql);
-    
+    /* No separate delete step is needed: the final writefile() below opens the
+    ** output with mode "wb", which truncates and overwrites any existing file.
+    ** (writefile(name, NULL) does not unlink a file - it just leaves a zero-byte
+    ** file - so the previous pre-delete calls were no-ops.) */
+
     /* Build the complete ZIP using zipfile() Aggregate Function */
     {
         StrBuf insert_sql;
