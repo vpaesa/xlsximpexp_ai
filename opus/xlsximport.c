@@ -222,6 +222,7 @@ static int parse_shared_strings(const char *xml, int xml_len,
 typedef struct {
   char *name;  /* Sheet name */
   int sheetId; /* Sheet ID */
+  char *rid;   /* Relationship id (r:id), used to find the worksheet file */
 } SheetInfo;
 
 typedef struct {
@@ -235,12 +236,14 @@ static void wb_init(Workbook *wb) { memset(wb, 0, sizeof(*wb)); }
 static void wb_free(Workbook *wb) {
   for (int i = 0; i < wb->count; i++) {
     free(wb->sheets[i].name);
+    free(wb->sheets[i].rid);
   }
   free(wb->sheets);
   memset(wb, 0, sizeof(*wb));
 }
 
-static void wb_add_sheet(Workbook *wb, const char *name, int sheetId) {
+static void wb_add_sheet(Workbook *wb, const char *name, int sheetId,
+                         const char *rid) {
   if (wb->count >= wb->capacity) {
     int new_cap = wb->capacity ? wb->capacity * 2 : 8;
     SheetInfo *new_sheets = realloc(wb->sheets, new_cap * sizeof(SheetInfo));
@@ -251,6 +254,7 @@ static void wb_add_sheet(Workbook *wb, const char *name, int sheetId) {
   }
   wb->sheets[wb->count].name = strdup(name ? name : "");
   wb->sheets[wb->count].sheetId = sheetId;
+  wb->sheets[wb->count].rid = rid ? strdup(rid) : NULL;
   wb->count++;
 }
 
@@ -260,6 +264,7 @@ static void XMLCALL wb_start_element(void *userData, const XML_Char *name,
 
   if (strcmp(name, "sheet") == 0) {
     const char *sheet_name = NULL;
+    const char *rid = NULL;
     int sheetId = 0;
 
     for (int i = 0; atts[i]; i += 2) {
@@ -267,11 +272,13 @@ static void XMLCALL wb_start_element(void *userData, const XML_Char *name,
         sheet_name = atts[i + 1];
       } else if (strcmp(atts[i], "sheetId") == 0) {
         sheetId = atoi(atts[i + 1]);
+      } else if (strcmp(atts[i], "r:id") == 0) {
+        rid = atts[i + 1];
       }
     }
 
     if (sheet_name) {
-      wb_add_sheet(wb, sheet_name, sheetId);
+      wb_add_sheet(wb, sheet_name, sheetId, rid);
     }
   }
 }
@@ -299,6 +306,119 @@ static int parse_workbook(const char *xml, int xml_len, Workbook *wb) {
 
   XML_ParserFree(parser);
   return 0;
+}
+
+/*
+** ============================================================================
+** Workbook Relationships Parser (r:id -> worksheet file)
+** ============================================================================
+**
+** The mapping from a sheet's r:id to its worksheet file lives in
+** xl/_rels/workbook.xml.rels. The positional "sheet1.xml, sheet2.xml, ..."
+** naming is a convention, not a guarantee, so we resolve the relationship
+** target instead of assuming it.
+*/
+
+typedef struct {
+  char *id;     /* Relationship id, e.g. "rId1" */
+  char *target; /* Target path relative to xl/, e.g. "worksheets/sheet1.xml" */
+} Relationship;
+
+typedef struct {
+  Relationship *items;
+  int count;
+  int capacity;
+} Relationships;
+
+static void rel_init(Relationships *r) { memset(r, 0, sizeof(*r)); }
+
+static void rel_free(Relationships *r) {
+  for (int i = 0; i < r->count; i++) {
+    free(r->items[i].id);
+    free(r->items[i].target);
+  }
+  free(r->items);
+  memset(r, 0, sizeof(*r));
+}
+
+static void rel_add(Relationships *r, const char *id, const char *target) {
+  if (r->count >= r->capacity) {
+    int new_cap = r->capacity ? r->capacity * 2 : 8;
+    Relationship *new_items = realloc(r->items, new_cap * sizeof(Relationship));
+    if (!new_items)
+      return;
+    r->items = new_items;
+    r->capacity = new_cap;
+  }
+  r->items[r->count].id = strdup(id ? id : "");
+  r->items[r->count].target = strdup(target ? target : "");
+  r->count++;
+}
+
+static void XMLCALL rel_start_element(void *userData, const XML_Char *name,
+                                      const XML_Char **atts) {
+  Relationships *r = (Relationships *)userData;
+
+  if (strcmp(name, "Relationship") == 0) {
+    const char *id = NULL;
+    const char *target = NULL;
+    for (int i = 0; atts[i]; i += 2) {
+      if (strcmp(atts[i], "Id") == 0) {
+        id = atts[i + 1];
+      } else if (strcmp(atts[i], "Target") == 0) {
+        target = atts[i + 1];
+      }
+    }
+    if (id && target) {
+      rel_add(r, id, target);
+    }
+  }
+}
+
+static int parse_relationships(const char *xml, int xml_len, Relationships *r) {
+  XML_Parser parser = XML_ParserCreate(NULL);
+  if (!parser)
+    return -1;
+
+  rel_init(r);
+
+  XML_SetUserData(parser, r);
+  XML_SetElementHandler(parser, rel_start_element, NULL);
+
+  if (XML_Parse(parser, xml, xml_len, 1) == XML_STATUS_ERROR) {
+    XML_ParserFree(parser);
+    rel_free(r);
+    return -1;
+  }
+
+  XML_ParserFree(parser);
+  return 0;
+}
+
+static const char *rel_find_target(Relationships *r, const char *id) {
+  if (!id)
+    return NULL;
+  for (int i = 0; i < r->count; i++) {
+    if (strcmp(r->items[i].id, id) == 0) {
+      return r->items[i].target;
+    }
+  }
+  return NULL;
+}
+
+/*
+** Resolve a relationship Target into a full path within the zip archive.
+** Targets in xl/_rels/workbook.xml.rels are relative to xl/ (e.g.
+** "worksheets/sheet1.xml"); a target beginning with '/' is taken from the
+** archive root. Returns a string allocated with sqlite3_mprintf(), or NULL.
+*/
+static char *resolve_worksheet_path(const char *target) {
+  if (!target || !*target)
+    return NULL;
+  if (target[0] == '/') {
+    return sqlite3_mprintf("%s", target + 1);
+  }
+  return sqlite3_mprintf("xl/%s", target);
 }
 
 /*
@@ -860,6 +980,22 @@ static void xlsx_import_func(sqlite3_context *ctx, int argc,
   }
   free(wb_data);
 
+  /* Read workbook relationships so we can map each sheet's r:id to its actual
+  ** worksheet file. Best-effort: if the rels are missing or a target cannot be
+  ** resolved, we fall back to the positional sheetN.xml name below. */
+  Relationships rels;
+  rel_init(&rels);
+  {
+    char *rels_data = NULL;
+    int rels_len = 0;
+    int rels_rc = read_zip_entry(db, filename, "xl/_rels/workbook.xml.rels",
+                                 &rels_data, &rels_len);
+    if (rels_rc == SQLITE_OK && rels_data && rels_len > 0) {
+      parse_relationships(rels_data, rels_len, &rels);
+    }
+    free(rels_data);
+  }
+
   /* Process each sheet */
   int tables_created = 0;
   for (int i = 0; i < wb.count; i++) {
@@ -868,13 +1004,24 @@ static void xlsx_import_func(sqlite3_context *ctx, int argc,
       continue;
     }
 
-    char sheet_path[64];
-    snprintf(sheet_path, sizeof(sheet_path), "xl/worksheets/sheet%d.xml",
-             i + 1);
+    /* Resolve the worksheet file via the relationship target, falling back to
+    ** the positional sheetN.xml name if the rels are missing or incomplete. */
+    char *sheet_path = NULL;
+    const char *target = rel_find_target(&rels, wb.sheets[i].rid);
+    if (target) {
+      sheet_path = resolve_worksheet_path(target);
+    }
+    if (!sheet_path) {
+      sheet_path = sqlite3_mprintf("xl/worksheets/sheet%d.xml", i + 1);
+    }
+    if (!sheet_path) {
+      continue; /* out of memory; skip this sheet */
+    }
 
     char *sheet_data = NULL;
     int sheet_len = 0;
     rc = read_zip_entry(db, filename, sheet_path, &sheet_data, &sheet_len);
+    sqlite3_free(sheet_path);
 
     if (rc != SQLITE_OK || !sheet_data || sheet_len == 0) {
       free(sheet_data);
@@ -894,6 +1041,7 @@ static void xlsx_import_func(sqlite3_context *ctx, int argc,
     if (rc != SQLITE_OK) {
       wb_free(&wb);
       ss_free(&ss);
+      rel_free(&rels);
       if (errmsg) {
         sqlite3_result_error(ctx, errmsg, -1);
         sqlite3_free(errmsg);
@@ -908,6 +1056,7 @@ static void xlsx_import_func(sqlite3_context *ctx, int argc,
 
   wb_free(&wb);
   ss_free(&ss);
+  rel_free(&rels);
 
   sqlite3_result_int(ctx, tables_created);
 }
