@@ -31,6 +31,7 @@ NOTES:
     - Sheet names are sanitized (max 31 chars, no \ / ? * [ ] :, no "History")
 */
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -212,6 +213,104 @@ static char *sanitize_sheet_name(const char *name) {
     return result;
 }
 
+/*
+** Compare two sheet names case-insensitively. Excel treats sheet names as
+** case-insensitive, so "Data" and "data" are considered the same name.
+*/
+static int sheet_name_ci_equal(const char *a, const char *b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return 0;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/*
+** Return a copy of `base` with "_<n>" appended, truncating `base` as needed so
+** the result stays within EXCEL_MAX_SHEET_NAME_LEN characters. Allocated with
+** sqlite3_malloc(); caller frees with sqlite3_free().
+*/
+static char *append_sheet_suffix(const char *base, int n) {
+    char suffix[16];
+    int slen, blen, keep;
+    char *out;
+
+    snprintf(suffix, sizeof(suffix), "_%d", n);
+    slen = (int)strlen(suffix);
+    blen = (int)strlen(base);
+    keep = blen;
+    if (keep + slen > EXCEL_MAX_SHEET_NAME_LEN)
+        keep = EXCEL_MAX_SHEET_NAME_LEN - slen;
+    if (keep < 0)
+        keep = 0;
+
+    out = sqlite3_malloc(keep + slen + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, base, keep);
+    memcpy(out + keep, suffix, slen + 1); /* copy including the NUL */
+    return out;
+}
+
+/*
+** Build an array of sanitized, unique sheet names from the given table names.
+** Each name is sanitized with sanitize_sheet_name(); if it collides
+** (case-insensitively) with an earlier sheet name, a numeric suffix is added
+** until it is unique. This prevents Excel from rejecting a workbook that would
+** otherwise contain duplicate sheet names. Returns an array of `count` strings,
+** each allocated with sqlite3_malloc(), or NULL on out-of-memory.
+*/
+static char **make_unique_sheet_names(const char **table_names, int count) {
+    char **out = sqlite3_malloc(sizeof(char *) * count);
+    int i, k;
+
+    if (!out)
+        return NULL;
+    memset(out, 0, sizeof(char *) * count);
+
+    for (i = 0; i < count; i++) {
+        char *base = sanitize_sheet_name(table_names[i]);
+        char *candidate = base;
+        int n = 2;
+
+        if (!base)
+            goto oom;
+
+        /* Append an increasing suffix until the name is unique. */
+        for (;;) {
+            int collides = 0;
+            for (k = 0; k < i; k++) {
+                if (sheet_name_ci_equal(out[k], candidate)) {
+                    collides = 1;
+                    break;
+                }
+            }
+            if (!collides)
+                break;
+            if (candidate != base)
+                sqlite3_free(candidate);
+            candidate = append_sheet_suffix(base, n++);
+            if (!candidate) {
+                sqlite3_free(base);
+                goto oom;
+            }
+        }
+
+        if (candidate != base)
+            sqlite3_free(base);
+        out[i] = candidate;
+    }
+    return out;
+
+oom:
+    for (i = 0; i < count; i++)
+        sqlite3_free(out[i]);
+    sqlite3_free(out);
+    return NULL;
+}
+
 /* Generate [Content_Types].xml */
 static char *gen_content_types(int sheet_count) {
     StrBuf sb;
@@ -281,12 +380,11 @@ static char *gen_workbook(const char **sheet_names, int sheet_count, char **rang
     
     int i;
     for (i = 0; i < sheet_count; i++) {
-        char *sanitized_name = sanitize_sheet_name(sheet_names[i]);
-        char *escaped_name = xml_escape(sanitized_name ? sanitized_name : "Sheet");
+        /* sheet_names are already sanitized and de-duplicated by the caller. */
+        char *escaped_name = xml_escape(sheet_names[i] ? sheet_names[i] : "Sheet");
         strbuf_appendf(&sb, "<sheet name=\"%s\" sheetId=\"%d\" r:id=\"rId%d\"/>",
             escaped_name, i + 1, i + 1);
         sqlite3_free(escaped_name);
-        sqlite3_free(sanitized_name);
     }
     strbuf_append(&sb, "</sheets>");
 
@@ -294,12 +392,10 @@ static char *gen_workbook(const char **sheet_names, int sheet_count, char **rang
         strbuf_append(&sb, "<definedNames>");
         for (i = 0; i < sheet_count; i++) {
             if (ranges[i]) {
-                char *sanitized_name = sanitize_sheet_name(sheet_names[i]);
-                char *escaped_name = xml_escape(sanitized_name ? sanitized_name : "Sheet");
+                char *escaped_name = xml_escape(sheet_names[i] ? sheet_names[i] : "Sheet");
                 strbuf_appendf(&sb, "<definedName name=\"_xlnm._FilterDatabase\" localSheetId=\"%d\" hidden=\"1\">%s!%s</definedName>",
                     i, escaped_name, ranges[i]);
                 sqlite3_free(escaped_name);
-                sqlite3_free(sanitized_name);
             }
         }
         strbuf_append(&sb, "</definedNames>");
@@ -526,6 +622,7 @@ static void xlsx_export_func(
     char **sheet_names_allocated = NULL;  /* For freeing dynamically allocated names */
     char **sheet_contents = NULL;
     char **ranges = NULL;
+    char **unique_names = NULL;  /* Sanitized + de-duplicated sheet display names */
     char *content_types = NULL;
     char *rels = NULL;
     char *workbook_rels = NULL;
@@ -661,11 +758,22 @@ static void xlsx_export_func(
         }
     }
     
+    /* Compute sanitized, unique sheet display names. Excel rejects a workbook
+    ** that contains duplicate sheet names, which can happen when two table
+    ** names sanitize to the same string (e.g. both truncated to 31 chars). The
+    ** worksheet data was generated above from the original table names; only
+    ** the workbook's display names are deduplicated here. */
+    unique_names = make_unique_sheet_names(sheet_names, sheet_count);
+    if (!unique_names) {
+        sqlite3_result_error(context, "Out of memory", -1);
+        goto cleanup;
+    }
+
     /* Generate other XML files */
     content_types = gen_content_types(sheet_count);
     rels = gen_rels();
     workbook_rels = gen_workbook_rels(sheet_count);
-    workbook = gen_workbook(sheet_names, sheet_count, ranges);
+    workbook = gen_workbook((const char **)unique_names, sheet_count, ranges);
     styles = gen_styles();
     
     if (!content_types || !rels || !workbook_rels || !workbook || !styles) {
@@ -783,6 +891,12 @@ cleanup:
             sqlite3_free(ranges[i]);
         }
         sqlite3_free(ranges);
+    }
+    if (unique_names) {
+        for (i = 0; i < sheet_count; i++) {
+            sqlite3_free(unique_names[i]);
+        }
+        sqlite3_free(unique_names);
     }
 }
 
