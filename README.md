@@ -21,16 +21,16 @@ Regardless of the LLM used, the extensions have the same API and same name, so t
 | -------- | ------- |------- |------- | ------- |
 | chatgpt_libopenxlsx | xlsxexport | ChatGPT 5.2 | OpenXLSX | Yes, but no autofilter |
 | chatgpt_libxlsxwriter | xlsxexport | ChatGPT 5.2 | libxlsxwriter | Yes |
-| chatgpt  | xlsxexport | ChatGPT 5.2 | zipfile | LibreOffice unhappy, Gnumeric happy |
+| chatgpt  | xlsxexport | ChatGPT 5.2 | fileio, zipfile | LibreOffice unhappy, Gnumeric happy |
 | chatgpt  | xlsximport | ChatGPT 5.2 | zipfile, expat | Import | Yes |
 | copilot_libxlsxwriter | xlsxexport | Copilot Think Deeper | libxlsxwriter | Yes |
-| copilot  | xlsxexport | Copilot Think Deeper | zipfile | Fails |
+| copilot  | xlsxexport | Copilot Think Deeper | fileio, zipfile | Fails |
 | copilot  | xlsximport | Copilot Think Deeper | zipfile, expat | Yes |
 | gemini_libxlsxwriter  | xlsxexport | Gemini 3 Pro | libxlsxwriter | Yes |
-| gemini  | xlsxexport | Gemini 3 Pro | zipfile | LibreOffice unhappy, Gnumeric happy |
+| gemini  | xlsxexport | Gemini 3 Pro | fileio, zipfile | LibreOffice unhappy, Gnumeric happy |
 | gemini  | xlsximport | Gemini 3 Pro | zipfile, expat | No |
 | opus_libxlsxwriter | xlsxexport | Claude Opus 4.5 | libxlsxwriter | Yes |
-| opus  | xlsxexport | Claude Opus 4.5 | zipfile | Yes |
+| opus  | xlsxexport | Claude Opus 4.5 | fileio, zipfile | Yes |
 | opus  | xlsximport | Claude Opus 4.5 | zipfile, expat | Yes |
 
 
@@ -69,6 +69,7 @@ SELECT xlsx_export_version();
 
 ### DEPENDENCIES:
 The [SQLite Zipfile Module](https://sqlite.org/zipfile.html) is used to read and write the ZIP files.
+The zipfile-based xlsxexport extensions (chatgpt, copilot, gemini, opus folders) also use the [SQLite fileio extension](https://sqlite.org/cli.html#file_i_o_functions) to write the output file. Both `zipfile` and `fileio` are built into the `sqlite3` shell; with the plain library, load them first via `.load zipfile` and `.load fileio`.
 Parsing XML is complicated so all xlsximport variants rely on a reputable library: [Expat](http://expat.sourceforge.net/).
 Writing XML is easier so the xlsxexport extension in the chatgpt, copilot, gemini, opus folders do not use external libraries. Do not worry about reputability because the xlsxexport extension in folders chatgpt_libxlsxwriter, copilot_libxlsxwriter and opus_libxlsxwriter depends on [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter).
 The xlsxexport extension in the chatgpt_libopenxlsx folder depends on [OpenXLSX](https://github.com/troldal/OpenXLSX). This library does not support autofilter.
