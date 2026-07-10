@@ -24,7 +24,10 @@ USAGE IN SQLITE:
     SELECT xlsx_export_version();
 
 NOTES:
-    - Requires the zipfile extension to be loaded first
+    - Requires the zipfile and fileio (writefile) extensions, both of which are
+      built into the sqlite3 shell. With the plain library, load them first via
+      ".load zipfile" and ".load fileio". xlsx_export checks for them and emits
+      a clear error if either is missing.
     - Generates XLSX-compliant XML files manually
     - Headers are bold (using styles.xml) with autofilter enabled
     - Warns if cell content exceeds Excel's 32,767 character limit
@@ -600,6 +603,19 @@ static char *gen_worksheet(sqlite3 *db, const char *table_name, char **err_msg,
 }
 
 /*
+** Return non-zero if `probe_sql` prepares successfully. Preparing a statement
+** resolves every SQL function and module it names, so this is used to detect
+** whether the zipfile() and writefile() helpers are available before we rely
+** on them to build and write the XLSX archive.
+*/
+static int probe_prepares(sqlite3 *db, const char *probe_sql) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, probe_sql, -1, &stmt, NULL);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_OK;
+}
+
+/*
 ** SQL function: xlsx_export(filename [, table1, table2, ...])
 **
 ** Exports tables to an XLSX file using the zipfile extension.
@@ -780,7 +796,28 @@ static void xlsx_export_func(
         sqlite3_result_error(context, "Failed to generate XML content", -1);
         goto cleanup;
     }
-    
+
+    /* This extension builds the XLSX archive with the zipfile() aggregate and
+    ** writes it to disk with writefile() (from the fileio extension). Neither is
+    ** part of the core SQLite library, so check for them up front and report
+    ** exactly which one is missing instead of failing obscurely later. */
+    if (!probe_prepares(db, "SELECT zipfile(NULL, NULL)")) {
+        sqlite3_result_error(context,
+            "xlsx_export requires the 'zipfile' extension, which is not loaded. "
+            "It is built into the sqlite3 shell; with the plain library load it "
+            "via \".load zipfile\" (and build SQLite with -DSQLITE_HAVE_ZLIB).",
+            -1);
+        goto cleanup;
+    }
+    if (!probe_prepares(db, "SELECT writefile(NULL, NULL)")) {
+        sqlite3_result_error(context,
+            "xlsx_export requires the 'writefile' function from the fileio "
+            "extension, which is not loaded. It is built into the sqlite3 shell; "
+            "with the plain library load it via \".load fileio\".",
+            -1);
+        goto cleanup;
+    }
+
     /* Delete existing file first using writefile if it exists */
     sql = sqlite3_mprintf("SELECT writefile(%Q, zeroblob(0))", filename);
     sqlite3_exec(db, sql, NULL, NULL, NULL);
