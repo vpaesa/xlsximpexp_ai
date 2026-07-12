@@ -1,6 +1,6 @@
 # Master Makefile
 
-SUBDIRS = chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
+SUBDIRS = chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter opus_noexpat copilot copilot_libxlsxwriter
 
 all:
 	@for dir in $(SUBDIRS); do \
