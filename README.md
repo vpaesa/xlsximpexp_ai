@@ -69,7 +69,8 @@ SELECT xlsx_export_version();
 
 ### DEPENDENCIES:
 The [SQLite Zipfile Module](https://sqlite.org/zipfile.html) is used to read and write the ZIP files.
-The zipfile-based xlsxexport extensions (chatgpt, copilot, gemini, opus folders) also use the [SQLite fileio extension](https://sqlite.org/cli.html#file_i_o_functions) to write the output file. Both `zipfile` and `fileio` are built into the `sqlite3` shell; with the plain library, load them first via `.load zipfile` and `.load fileio`.
+The zipfile-based xlsxexport extensions (chatgpt, copilot, gemini, opus folders) also use the [SQLite fileio extension](https://sqlite.org/cli.html#file_i_o_functions) to write the output file. Both `zipfile` and `fileio` are built into the `sqlite3` shell; with the plain library, load them first via SQL `load_extension(X,Y)`, or `sqlite3_load_extension()` C interface.
+
 Parsing XML is complicated so all xlsximport variants rely on a reputable library: [Expat](http://expat.sourceforge.net/).
 Writing XML is easier so the xlsxexport extension in the chatgpt, copilot, gemini, opus folders do not use external libraries. Do not worry about reputability because the xlsxexport extension in folders chatgpt_libxlsxwriter, copilot_libxlsxwriter and opus_libxlsxwriter depends on [libxlsxwriter](https://github.com/jmcnamara/libxlsxwriter).
 The xlsxexport extension in the chatgpt_libopenxlsx folder depends on [OpenXLSX](https://github.com/troldal/OpenXLSX). This library does not support autofilter.
