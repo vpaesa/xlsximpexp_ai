@@ -1162,7 +1162,7 @@ static void xlsx_import_version_func(sqlite3_context *ctx, int argc,
                                      sqlite3_value **argv) {
   (void)argc;
   (void)argv;
-  sqlite3_result_text(ctx, "2026-01-07 Claude Opus 4.5 (Thinking)", -1,
+  sqlite3_result_text(ctx, "2026-07-11 Claude Opus 4.5 (Thinking)", -1,
                       SQLITE_STATIC);
 }
 
