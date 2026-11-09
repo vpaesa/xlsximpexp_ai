@@ -14,13 +14,13 @@
 #cp -p /usr/x86_64-w64-mingw32/lib/zlib1.dll .
 #cp -p /usr/x86_64-w64-mingw32/bin/libexpat-1.dll .
 
-for SQLITE in 'wine ./sqlite3.exe' ./sqlite3
+for SQLITE in  ./sqlite3 'wine ./sqlite3.exe'
 do
   echo "=============================== Using $SQLITE ==============================="
   $SQLITE ':memory:' '.ver'
   echo "============================================================================="
   echo -e "+++++++++++++++++++++++++++++++\nMinimal Testing of xlsximport and xlsxexport"
-  for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
+  for llm in glm qwen opus chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus_libxlsxwriter copilot copilot_libxlsxwriter
   do
     echo -e "-------------------------------\nLLM: ${llm}"
     $SQLITE ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport" "SELECT xlsx_import('09_severalsheets_t_06.xlsx');" \
@@ -30,7 +30,7 @@ do
   done
 
   echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsximport"
-  for llm in opus gemini copilot chatgpt
+  for llm in glm qwen opus gemini copilot chatgpt
   do
     echo -e "-------------------------------\nLLM: ${llm}"
     for i in ??_*_??.xlsx
@@ -57,7 +57,7 @@ do
   done
 
   echo -e "+++++++++++++++++++++++++++++++\nThorough Testing xlsxexport"
-  for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
+  for llm in glm qwen opus chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus_libxlsxwriter copilot copilot_libxlsxwriter
   do
     echo -e "-------------------------------\nLLM: ${llm}"
     #for i in ??_*_??.xlsx
@@ -88,19 +88,22 @@ do
 done
 exit
 
-echo -e "+++++++++++++++++++++++++++++++\nTest with a 117MB spreadsheet of xlsximport and xlsxexport"
-ls -l ../attic/WDIEXCEL_Libreoffice.xlsx
-for llm in chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
+for SQLITE in  ./sqlite3 'wine ./sqlite3.exe'
 do
-  echo -e "-------------------------------\nLLM: ${llm}"
-  $SQLITE ':memory:' ".load ../${llm%_libxlsxwriter}/xlsximport" '.output counts.sql' \
-  "SELECT 'select ' || quote(sheet_name) || ' as sheet_name, count(*) from \"' || sheet_name || '\" union all ' FROM xlsx_import_sheetnames('../attic/WDIEXCEL_Libreoffice.xlsx');" \
-  ".print \"select '', '';\""
-  time $SQLITE ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport" "SELECT xlsx_import('../attic/WDIEXCEL_Libreoffice.xlsx');" \
-  '.read counts.sql' 'SELECT xlsx_import_version();' '.schema' \
-  ".load ../${llm}/xlsxexport" "SELECT xlsx_export('validating_WDIEXCEL_Libreoffice_${llm}.xlsx');" 'SELECT xlsx_export_version();'
+	echo -e "+++++++++++++++++++++++++++++++\nTest with a 117MB spreadsheet of xlsximport and xlsxexport"
+	ls -l ../attic/WDIEXCEL_Libreoffice.xlsx
+	for llm in glm qwen chatgpt chatgpt_libxlsxwriter gemini gemini_libxlsxwriter opus opus_libxlsxwriter copilot copilot_libxlsxwriter
+	do
+	  echo -e "-------------------------------\nLLM: ${llm}"
+	  $SQLITE ':memory:' ".load ../${llm%_libxlsxwriter}/xlsximport" '.output counts.sql' \
+	  "SELECT 'select ' || quote(sheet_name) || ' as sheet_name, count(*) from \"' || sheet_name || '\" union all ' FROM xlsx_import_sheetnames('../attic/WDIEXCEL_Libreoffice.xlsx');" \
+	  ".print \"select '', '';\""
+	  time $SQLITE ':memory:' '.mode box' ".load ../${llm%_libxlsxwriter}/xlsximport" "SELECT xlsx_import('../attic/WDIEXCEL_Libreoffice.xlsx');" \
+	  '.read counts.sql' 'SELECT xlsx_import_version();' '.schema' \
+	  ".load ../${llm}/xlsxexport" "SELECT xlsx_export('validating_WDIEXCEL_Libreoffice_${llm}.xlsx');" 'SELECT xlsx_export_version();'
+	done
+	ls -l validating_WDIEXCEL_Libreoffice_*.xlsx
 done
-ls -l validating_WDIEXCEL_Libreoffice_*.xlsx
 
 exit
 
