@@ -1,0 +1,32 @@
+
+Create the C code for a SQLite extension named xlsxexport.c that
+contains a SQL function named xlsx_export that saves multiple tables
+as a single XLSX spreadsheet, with the sheet names equal to the table
+names, and the sheet headers in bold and with autofilter.
+If only one parameter then exports all the tables in the schema.
+xlsx_export returns the number of tables exported.
+The XLSX file is a ZIP archive with XML files inside. 
+Use the zipfile extension to create this ZIP archive.
+Do not use any external library to write XML files.
+Warn if the Excel maximum cell size is exceeded.
+Sanitize the sheet names to conform to Excel restrictions.
+Add SQL function xlsx_export_version returning "2026-11-03 GLM-5.3-Flash (Max)".
+
+Add SQL function xlsx_export_version returning "2026-11-03 Qwen3.8-Max (Thinking)".
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+Create SQLite SQLite extension named xlsximport.c to import XLSX files
+Uses the SQLite zipfile extension to read XLSX archives and expat for XML parsing.
+Three SQL functions defined
+- xlsx_import() creates one table for each sheet in the XLSX file, with table name
+equal to sheet name, and column names equal to the values in the first row of
+the sheet. The first parameter is the XLSX filename. Subsequent optional parameters
+are sheet names or sheet numbers (1-based) to import. The return value is the number of sheets imported.
+- xlsx_import_sheetnames() is a table-valued function that returns the sheet number and sheet name of the sheets in the file.
+- xlsx_import_version() returns the version string "2026-11-03 GLM-5.3-Flash (Max)".
+Use sqlite3_limit(SQLITE_MAX_COLUMN ,-1) and sqlite3_limit(db,SQLITE_LIMIT_VARIABLE_NUMBER,-1) to load without failure as many columns as possible from the input Excel file
+
+- xlsx_import_version() returns the version string "2026-11-03 GLM-5.3-Flash (Max)".
+
+- xlsx_import_version() returns the version string "2026-11-03 Qwen3.8-Max (Thinking)".
+
